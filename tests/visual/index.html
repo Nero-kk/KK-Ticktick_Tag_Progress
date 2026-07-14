@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TickTick Tag Progress Visual Harness</title>
+    <style>
+      :root {
+        --background-primary: #f7f6f2;
+        --background-secondary: #eceae3;
+        --background-modifier-border: #c8c5ba;
+        --text-normal: #252722;
+        --text-muted: #686b62;
+        --text-faint: #989b91;
+        --text-warning: #b46916;
+        --text-on-accent: #fff;
+        --interactive-accent: #2476c9;
+        --color-green: #2f9e44;
+        --font-interface-theme: "Aptos", "Malgun Gothic", sans-serif;
+      }
+      body.theme-dark {
+        --background-primary: #181b1a;
+        --background-secondary: #252927;
+        --background-modifier-border: #454b47;
+        --text-normal: #e6e8e4;
+        --text-muted: #a8ada7;
+        --text-faint: #747b75;
+        --text-warning: #e8a44c;
+        --interactive-accent: #4a9aeb;
+        --color-green: #4db764;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100vh; background: var(--background-primary); font-family: var(--font-interface-theme); }
+      #app { min-height: 100vh; }
+    </style>
+  </head>
+  <body>
+    <main id="app"></main>
+    <script type="module" src="./harness.ts"></script>
+  </body>
+</html>
