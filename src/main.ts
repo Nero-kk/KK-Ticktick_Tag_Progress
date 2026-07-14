@@ -116,8 +116,8 @@ export default class TickTickTagProgressPlugin extends Plugin {
     const rows = aggregateTagProgress(snapshot.tasks, month, { showUntagged: this.settings.showUntagged })
       .filter((row) => (include.size === 0 || include.has(row.tagKey)) && !exclude.has(row.tagKey));
     const scheduled = snapshot.tasks.filter((task) => {
-      const start = task.startAt ?? task.dueAt;
-      const due = task.dueAt ?? task.startAt;
+      const start = task.localStartDate ?? task.localDueDate;
+      const due = task.localDueDate ?? task.localStartDate;
       return Boolean(start && due && clampTaskToMonth(start, due, month));
     });
     const failedAfterSnapshot = lastAttempt

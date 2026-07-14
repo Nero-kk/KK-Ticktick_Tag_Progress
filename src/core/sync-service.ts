@@ -7,6 +7,7 @@ import type {
   TickTickTask,
 } from '../api/contracts';
 import { TickTickHttpError } from '../api/errors';
+import { systemTimeZone, toLocalDate } from './local-date';
 import { normalizeTask } from './normalizer';
 import { clampTaskToMonth, getMonthRange } from './period';
 import { SnapshotStore } from './snapshot-store';
@@ -41,23 +42,28 @@ export class SyncService {
         this.api.getCompletedTasks({ projectIds, ...range }),
       ]);
       const projectNames = new Map(projects.map((project) => [project.id, project.name]));
+      const fallbackTimeZone = systemTimeZone();
       const rawById = new Map<string, TickTickTask>();
       const projectDataInScope = projectData.flatMap((data) => data.tasks).filter((raw) => {
         const start = raw.startDate ?? raw.dueDate;
         const due = raw.dueDate ?? raw.startDate;
-        return (!start && !due) || Boolean(start && due && clampTaskToMonth(start, due, selectedMonth));
+        if (!start && !due) return true;
+        const isAllDay = raw.isAllDay === true;
+        const localStart = start ? toLocalDate(start, raw.timeZone, isAllDay, fallbackTimeZone) : null;
+        const localDue = due ? toLocalDate(due, raw.timeZone, isAllDay, fallbackTimeZone) : null;
+        return Boolean(localStart && localDue && clampTaskToMonth(localStart, localDue, selectedMonth));
       });
       for (const raw of [...filtered, ...completed, ...projectDataInScope]) {
         if (raw?.id && !rawById.has(raw.id)) rawById.set(raw.id, raw);
       }
       const tasks = [...rawById.values()].map((raw) => {
-        const normalized = normalizeTask(raw, projectNames.get(raw.projectId) ?? raw.projectId);
+        const normalized = normalizeTask(raw, projectNames.get(raw.projectId) ?? raw.projectId, fallbackTimeZone);
         delete normalized.content;
         return normalized;
       });
       const generatedAt = new Date().toISOString();
       const snapshot: SyncSnapshot = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         selectedMonth,
         generatedAt,
         coverage: {

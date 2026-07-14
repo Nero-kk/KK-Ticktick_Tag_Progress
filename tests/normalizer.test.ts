@@ -27,4 +27,22 @@ describe('normalizeTask', () => {
       id: 'checklist', projectId: 'p', title: 'Checklist', desc: 'Checklist body', priority: 0, status: 0,
     }, 'P').content).toBe('Checklist body');
   });
+
+  it('derives local dates from a timed task using the task time zone', () => {
+    const task = normalizeTask({
+      id: 'timed', projectId: 'p', title: 'Timed', priority: 0, status: 0, isAllDay: false,
+      startDate: '2026-06-30T15:00:00.000+0000', dueDate: '2026-07-14T15:00:00.000+0000', timeZone: 'Asia/Seoul',
+    }, 'P', 'UTC');
+    expect(task.localStartDate).toBe('2026-07-01');
+    expect(task.localDueDate).toBe('2026-07-15');
+  });
+
+  it('keeps all-day dates as floating calendar dates', () => {
+    const task = normalizeTask({
+      id: 'allday', projectId: 'p', title: 'All day', priority: 0, status: 0, isAllDay: true,
+      startDate: '2026-07-01T00:00:00.000+0000', dueDate: '2026-07-03T00:00:00.000+0000', timeZone: 'America/Los_Angeles',
+    }, 'P', 'UTC');
+    expect(task.localStartDate).toBe('2026-07-01');
+    expect(task.localDueDate).toBe('2026-07-03');
+  });
 });

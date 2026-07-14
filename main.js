@@ -320,8 +320,8 @@ function aggregateTagProgress(input, month, options = {}) {
     if (task.status !== "open" && task.status !== "completed") continue;
     const rawTags = task.tags.length > 0 ? task.tags : options.showUntagged ? ["\uBBF8\uBD84\uB958"] : [];
     if (rawTags.length === 0) continue;
-    const start = task.startAt ?? task.dueAt;
-    const due = task.dueAt ?? task.startAt;
+    const start = task.localStartDate ?? task.localDueDate;
+    const due = task.localDueDate ?? task.localStartDate;
     const span = start && due ? clampTaskToMonth(start, due, month) : null;
     const unscheduled = !start && !due;
     if (!span && !unscheduled) continue;
@@ -366,6 +366,42 @@ function aggregateTagProgress(input, month, options = {}) {
   return [...rows.values()].filter((row) => row.total > 0 || row.unscheduledCount > 0).sort((a, b) => a.tagKey.localeCompare(b.tagKey)).map(({ taskIdSet: _taskIdSet, ...row }) => row);
 }
 
+// src/core/local-date.ts
+var DATE_PREFIX = /^(\d{4}-\d{2}-\d{2})/;
+function systemTimeZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+function isValidTimeZone(timeZone) {
+  try {
+    new Intl.DateTimeFormat("en-CA", { timeZone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function formatInZone(instant, timeZone) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(new Date(instant));
+}
+function toLocalDate(iso, timeZone, isAllDay, fallbackTimeZone) {
+  const match = DATE_PREFIX.exec(iso);
+  if (!match) return null;
+  const datePart2 = match[1];
+  if (isAllDay) return datePart2;
+  const instant = Date.parse(iso);
+  if (!Number.isFinite(instant)) return datePart2;
+  const zone = timeZone && isValidTimeZone(timeZone) ? timeZone : fallbackTimeZone;
+  return formatInZone(instant, zone);
+}
+
 // src/core/normalizer.ts
 function requireString(value, field) {
   if (typeof value !== "string" || value.trim() === "") throw new Error(`Invalid task ${field}`);
@@ -377,11 +413,17 @@ function normalizeStatus(status) {
   if (status === -1) return "abandoned";
   return "unknown";
 }
-function normalizeTask(raw, projectName) {
+function normalizeTask(raw, projectName, fallbackTimeZone = systemTimeZone()) {
   const id = requireString(raw.id, "id");
   const projectId = requireString(raw.projectId, "projectId");
   const title = requireString(raw.title, "title");
   const body = typeof raw.content === "string" ? raw.content : typeof raw.desc === "string" ? raw.desc : void 0;
+  const startAt = typeof raw.startDate === "string" ? raw.startDate : void 0;
+  const dueAt = typeof raw.dueDate === "string" ? raw.dueDate : void 0;
+  const timeZone = typeof raw.timeZone === "string" ? raw.timeZone : void 0;
+  const isAllDay = raw.isAllDay === true;
+  const localStartDate = startAt ? toLocalDate(startAt, timeZone, isAllDay, fallbackTimeZone) : null;
+  const localDueDate = dueAt ? toLocalDate(dueAt, timeZone, isAllDay, fallbackTimeZone) : null;
   return {
     id,
     projectId,
@@ -390,11 +432,13 @@ function normalizeTask(raw, projectName) {
     ...body === void 0 ? {} : { content: body },
     tags: Array.isArray(raw.tags) ? raw.tags.filter((tag) => typeof tag === "string" && tag.trim() !== "") : [],
     status: normalizeStatus(raw.status),
-    ...typeof raw.startDate === "string" ? { startAt: raw.startDate } : {},
-    ...typeof raw.dueDate === "string" ? { dueAt: raw.dueDate } : {},
+    ...startAt === void 0 ? {} : { startAt },
+    ...dueAt === void 0 ? {} : { dueAt },
     ...typeof raw.completedTime === "string" ? { completedAt: raw.completedTime } : {},
-    ...typeof raw.timeZone === "string" ? { timeZone: raw.timeZone } : {},
-    isAllDay: raw.isAllDay === true
+    ...timeZone === void 0 ? {} : { timeZone },
+    isAllDay,
+    ...localStartDate ? { localStartDate } : {},
+    ...localDueDate ? { localDueDate } : {}
   };
 }
 
@@ -420,6 +464,12 @@ function sanitizeTask(value) {
   const tags = stringArray(item.tags);
   const statuses = ["open", "completed", "abandoned", "unknown"];
   if (!tags || typeof item.status !== "string" || !statuses.includes(item.status) || typeof item.isAllDay !== "boolean") return null;
+  const startAt = optionalString(item.startAt);
+  const dueAt = optionalString(item.dueAt);
+  const timeZone = optionalString(item.timeZone);
+  const fallbackTimeZone = systemTimeZone();
+  const localStartDate = startAt ? toLocalDate(startAt, timeZone, item.isAllDay, fallbackTimeZone) : null;
+  const localDueDate = dueAt ? toLocalDate(dueAt, timeZone, item.isAllDay, fallbackTimeZone) : null;
   return {
     id: item.id,
     projectId: item.projectId,
@@ -427,11 +477,13 @@ function sanitizeTask(value) {
     title: item.title,
     tags,
     status: item.status,
-    ...optionalString(item.startAt) === void 0 ? {} : { startAt: optionalString(item.startAt) },
-    ...optionalString(item.dueAt) === void 0 ? {} : { dueAt: optionalString(item.dueAt) },
+    ...startAt === void 0 ? {} : { startAt },
+    ...dueAt === void 0 ? {} : { dueAt },
     ...optionalString(item.completedAt) === void 0 ? {} : { completedAt: optionalString(item.completedAt) },
-    ...optionalString(item.timeZone) === void 0 ? {} : { timeZone: optionalString(item.timeZone) },
-    isAllDay: item.isAllDay
+    ...timeZone === void 0 ? {} : { timeZone },
+    isAllDay: item.isAllDay,
+    ...localStartDate ? { localStartDate } : {},
+    ...localDueDate ? { localDueDate } : {}
   };
 }
 function sanitizeCoverage(value, selectedMonth) {
@@ -458,7 +510,7 @@ function sanitizeCoverage(value, selectedMonth) {
 }
 function sanitizeSnapshot(value) {
   const item = record2(value);
-  if (!item || item.schemaVersion !== 1 || !nonEmptyString2(item.selectedMonth) || !/^\d{4}-(0[1-9]|1[0-2])$/.test(item.selectedMonth) || !nonEmptyString2(item.generatedAt) || !Array.isArray(item.tasks)) return null;
+  if (!item || item.schemaVersion !== 1 && item.schemaVersion !== 2 || !nonEmptyString2(item.selectedMonth) || !/^\d{4}-(0[1-9]|1[0-2])$/.test(item.selectedMonth) || !nonEmptyString2(item.generatedAt) || !Array.isArray(item.tasks)) return null;
   const coverage = sanitizeCoverage(item.coverage, item.selectedMonth);
   if (!coverage) return null;
   const tasks = [];
@@ -468,7 +520,7 @@ function sanitizeSnapshot(value) {
     tasks.push(sanitized);
   }
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     selectedMonth: item.selectedMonth,
     generatedAt: item.generatedAt,
     coverage,
@@ -550,23 +602,28 @@ var SyncService = class {
         this.api.getCompletedTasks({ projectIds, ...range })
       ]);
       const projectNames = new Map(projects.map((project) => [project.id, project.name]));
+      const fallbackTimeZone = systemTimeZone();
       const rawById = /* @__PURE__ */ new Map();
       const projectDataInScope = projectData.flatMap((data) => data.tasks).filter((raw) => {
         const start = raw.startDate ?? raw.dueDate;
         const due = raw.dueDate ?? raw.startDate;
-        return !start && !due || Boolean(start && due && clampTaskToMonth(start, due, selectedMonth));
+        if (!start && !due) return true;
+        const isAllDay = raw.isAllDay === true;
+        const localStart = start ? toLocalDate(start, raw.timeZone, isAllDay, fallbackTimeZone) : null;
+        const localDue = due ? toLocalDate(due, raw.timeZone, isAllDay, fallbackTimeZone) : null;
+        return Boolean(localStart && localDue && clampTaskToMonth(localStart, localDue, selectedMonth));
       });
       for (const raw of [...filtered, ...completed, ...projectDataInScope]) {
         if (raw?.id && !rawById.has(raw.id)) rawById.set(raw.id, raw);
       }
       const tasks = [...rawById.values()].map((raw) => {
-        const normalized = normalizeTask(raw, projectNames.get(raw.projectId) ?? raw.projectId);
+        const normalized = normalizeTask(raw, projectNames.get(raw.projectId) ?? raw.projectId, fallbackTimeZone);
         delete normalized.content;
         return normalized;
       });
       const generatedAt = (/* @__PURE__ */ new Date()).toISOString();
       const snapshot = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         selectedMonth,
         generatedAt,
         coverage: {
@@ -1111,7 +1168,7 @@ function renderDrilldown(root, model, actions) {
     detail.type = "button";
     detail.setAttribute("aria-label", `${task.title} \uB178\uD2B8 \uC0DD\uC131 \uB610\uB294 \uC5F4\uAE30`);
     detail.title = "\uD0DC\uC2A4\uD06C \uB178\uD2B8 \uC0DD\uC131 \uB610\uB294 \uC5F4\uAE30";
-    detail.append(element("strong", void 0, task.title), element("span", void 0, task.dueAt?.slice(0, 10) ?? "\uAE30\uAC04 \uBBF8\uC9C0\uC815"));
+    detail.append(element("strong", void 0, task.title), element("span", void 0, task.localDueDate ?? "\uAE30\uAC04 \uBBF8\uC9C0\uC815"));
     detail.addEventListener("click", (event) => actions.onOpenTask(task.id, event.ctrlKey || event.metaKey));
     item.append(state, detail);
     list.append(item);
@@ -1339,8 +1396,8 @@ var TickTickTagProgressPlugin = class extends import_obsidian5.Plugin {
     const exclude = new Set(this.settings.excludeTags.map(normalizeTagKey));
     const rows = aggregateTagProgress(snapshot.tasks, month, { showUntagged: this.settings.showUntagged }).filter((row) => (include.size === 0 || include.has(row.tagKey)) && !exclude.has(row.tagKey));
     const scheduled = snapshot.tasks.filter((task) => {
-      const start = task.startAt ?? task.dueAt;
-      const due = task.dueAt ?? task.startAt;
+      const start = task.localStartDate ?? task.localDueDate;
+      const due = task.localDueDate ?? task.localStartDate;
       return Boolean(start && due && clampTaskToMonth(start, due, month));
     });
     const failedAfterSnapshot = lastAttempt && lastAttempt.selectedMonth === month && lastAttempt.result !== "success" && lastAttempt.attemptedAt > snapshot.generatedAt;

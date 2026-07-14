@@ -156,7 +156,7 @@ function renderDrilldown(root: HTMLElement, model: DashboardModel, actions: Dash
     detail.type = 'button';
     detail.setAttribute('aria-label', `${task.title} 노트 생성 또는 열기`);
     detail.title = '태스크 노트 생성 또는 열기';
-    detail.append(element('strong', undefined, task.title), element('span', undefined, task.dueAt?.slice(0, 10) ?? '기간 미지정'));
+    detail.append(element('strong', undefined, task.title), element('span', undefined, task.localDueDate ?? '기간 미지정'));
     detail.addEventListener('click', (event) => actions.onOpenTask(task.id, event.ctrlKey || event.metaKey));
     item.append(state, detail);
     list.append(item);

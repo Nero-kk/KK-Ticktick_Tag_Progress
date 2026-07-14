@@ -7,7 +7,7 @@ const model: DashboardModel = {
   month: '2026-07', status: 'complete', lastSuccessAt: '2026-07-14T05:32:00Z',
   uniqueTaskCount: 80, selectedTagKey: 'unios8k',
   rows: [{ tagKey: 'unios8k', displayName: 'UNIOS8K', completed: 60, open: 20, total: 80, percent: 75, visibleStartDay: 1, visibleEndDay: 10, clippedBeforeMonth: false, clippedAfterMonth: false, hasUnscheduledTasks: false, unscheduledCount: 0, taskIds: ['t1'] }],
-  tasks: [{ id: 't1', projectId: 'p', projectName: 'UNIOS8K', title: 'Main frame 검토', tags: ['UNIOS8K'], status: 'open', startAt: '2026-07-01', dueAt: '2026-07-10', isAllDay: true }],
+  tasks: [{ id: 't1', projectId: 'p', projectName: 'UNIOS8K', title: 'Main frame 검토', tags: ['UNIOS8K'], status: 'open', startAt: '2026-07-01', dueAt: '2026-07-10', isAllDay: true, localStartDate: '2026-07-01', localDueDate: '2026-07-10' }],
 };
 
 function actions(overrides: Partial<DashboardActions> = {}): DashboardActions {

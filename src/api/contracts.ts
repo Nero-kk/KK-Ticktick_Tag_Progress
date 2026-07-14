@@ -70,6 +70,8 @@ export interface NormalizedTask {
   completedAt?: string;
   timeZone?: string;
   isAllDay: boolean;
+  localStartDate?: string;
+  localDueDate?: string;
 }
 
 export interface SyncCoverage {
@@ -83,7 +85,7 @@ export interface SyncCoverage {
 }
 
 export interface SyncSnapshot {
-  schemaVersion: 1;
+  schemaVersion: 2;
   selectedMonth: string;
   generatedAt: string;
   coverage: SyncCoverage;

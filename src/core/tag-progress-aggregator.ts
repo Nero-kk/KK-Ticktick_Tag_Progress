@@ -22,8 +22,8 @@ export function aggregateTagProgress(
     if (task.status !== 'open' && task.status !== 'completed') continue;
     const rawTags = task.tags.length > 0 ? task.tags : options.showUntagged ? ['미분류'] : [];
     if (rawTags.length === 0) continue;
-    const start = task.startAt ?? task.dueAt;
-    const due = task.dueAt ?? task.startAt;
+    const start = task.localStartDate ?? task.localDueDate;
+    const due = task.localDueDate ?? task.localStartDate;
     const span = start && due ? clampTaskToMonth(start, due, month) : null;
     const unscheduled = !start && !due;
     if (!span && !unscheduled) continue;
