@@ -9,7 +9,7 @@ import type { ApiTransport } from './api/official-open-api-client';
 import { OfficialOpenApiClient } from './api/official-open-api-client';
 import { TickTickHttpError } from './api/errors';
 import { addTickTickView } from './bases/projects-base-integrator';
-import { aggregateTagProgress, normalizeTagKey } from './core/tag-progress-aggregator';
+import { aggregateTagProgress, normalizeTagKey, UNTAGGED_KEY } from './core/tag-progress-aggregator';
 import { normalizeTask } from './core/normalizer';
 import { clampTaskToMonth } from './core/period';
 import { SnapshotStore } from './core/snapshot-store';
@@ -114,7 +114,9 @@ export default class TickTickTagProgressPlugin extends Plugin {
     const include = new Set(this.settings.includeTags.map(normalizeTagKey));
     const exclude = new Set(this.settings.excludeTags.map(normalizeTagKey));
     const rows = aggregateTagProgress(snapshot.tasks, month, { showUntagged: this.settings.showUntagged })
-      .filter((row) => (include.size === 0 || include.has(row.tagKey)) && !exclude.has(row.tagKey));
+      .filter((row) => (row.tagKey === UNTAGGED_KEY
+        ? this.settings.showUntagged
+        : (include.size === 0 || include.has(row.tagKey)) && !exclude.has(row.tagKey)));
     const scheduled = snapshot.tasks.filter((task) => {
       const start = task.localStartDate ?? task.localDueDate;
       const due = task.localDueDate ?? task.localStartDate;

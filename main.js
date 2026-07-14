@@ -317,6 +317,8 @@ function clampTaskToMonth(start, due, month) {
 }
 
 // src/core/tag-progress-aggregator.ts
+var UNTAGGED_KEY = "__untagged__";
+var UNTAGGED_DISPLAY = "\uBBF8\uBD84\uB958";
 function normalizeTagKey(tag) {
   return tag.normalize("NFKC").toLocaleLowerCase("en-US");
 }
@@ -326,21 +328,20 @@ function aggregateTagProgress(input, month, options = {}) {
   const rows = /* @__PURE__ */ new Map();
   for (const task of uniqueTasks.values()) {
     if (task.status !== "open" && task.status !== "completed") continue;
-    const rawTags = task.tags.length > 0 ? task.tags : options.showUntagged ? ["\uBBF8\uBD84\uB958"] : [];
-    if (rawTags.length === 0) continue;
+    const tagEntries = task.tags.length > 0 ? task.tags.map((raw) => ({ tagKey: normalizeTagKey(raw), displayName: raw.normalize("NFKC") })) : options.showUntagged ? [{ tagKey: UNTAGGED_KEY, displayName: UNTAGGED_DISPLAY }] : [];
+    if (tagEntries.length === 0) continue;
     const start = task.localStartDate ?? task.localDueDate;
     const due = task.localDueDate ?? task.localStartDate;
     const span = start && due ? clampTaskToMonth(start, due, month) : null;
     const unscheduled = !start && !due;
     if (!span && !unscheduled) continue;
     const seenTags = /* @__PURE__ */ new Set();
-    for (const rawTag of rawTags) {
-      const tagKey = normalizeTagKey(rawTag);
+    for (const { tagKey, displayName } of tagEntries) {
       if (seenTags.has(tagKey)) continue;
       seenTags.add(tagKey);
       const row = rows.get(tagKey) ?? {
         tagKey,
-        displayName: rawTag.normalize("NFKC"),
+        displayName,
         completed: 0,
         open: 0,
         total: 0,
@@ -1403,7 +1404,7 @@ var TickTickTagProgressPlugin = class extends import_obsidian5.Plugin {
     }
     const include = new Set(this.settings.includeTags.map(normalizeTagKey));
     const exclude = new Set(this.settings.excludeTags.map(normalizeTagKey));
-    const rows = aggregateTagProgress(snapshot.tasks, month, { showUntagged: this.settings.showUntagged }).filter((row) => (include.size === 0 || include.has(row.tagKey)) && !exclude.has(row.tagKey));
+    const rows = aggregateTagProgress(snapshot.tasks, month, { showUntagged: this.settings.showUntagged }).filter((row) => row.tagKey === UNTAGGED_KEY ? this.settings.showUntagged : (include.size === 0 || include.has(row.tagKey)) && !exclude.has(row.tagKey));
     const scheduled = snapshot.tasks.filter((task) => {
       const start = task.localStartDate ?? task.localDueDate;
       const due = task.localDueDate ?? task.localStartDate;

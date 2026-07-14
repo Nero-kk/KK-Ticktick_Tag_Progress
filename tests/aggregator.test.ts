@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { aggregateTagProgress } from '../src/core/tag-progress-aggregator';
+import { aggregateTagProgress, UNTAGGED_KEY } from '../src/core/tag-progress-aggregator';
 import type { NormalizedTask } from '../src/api/contracts';
 
 function task(
@@ -43,5 +43,24 @@ describe('aggregateTagProgress', () => {
 
   it('excludes abandoned and unknown tasks', () => {
     expect(aggregateTagProgress([task('a', 'abandoned', ['A']), task('u', 'unknown', ['A'])], '2026-07')).toEqual([]);
+  });
+
+  it('gathers untagged tasks under a reserved key only when showUntagged is on', () => {
+    const untagged = task('u', 'open', []);
+    expect(aggregateTagProgress([untagged], '2026-07')).toEqual([]);
+    const [row] = aggregateTagProgress([untagged], '2026-07', { showUntagged: true });
+    expect(row).toMatchObject({ tagKey: UNTAGGED_KEY, displayName: '미분류', total: 1 });
+  });
+
+  it('keeps a real "미분류" tag separate from the reserved untagged row', () => {
+    const rows = aggregateTagProgress(
+      [task('real', 'open', ['미분류']), task('none', 'open', [])],
+      '2026-07',
+      { showUntagged: true },
+    );
+    const keys = rows.map((row) => row.tagKey);
+    expect(keys).toContain('미분류');
+    expect(keys).toContain(UNTAGGED_KEY);
+    expect(keys).toHaveLength(2);
   });
 });

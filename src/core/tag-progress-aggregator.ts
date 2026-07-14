@@ -5,6 +5,14 @@ interface MutableRow extends TagProgress {
   taskIdSet: Set<string>;
 }
 
+/**
+ * Reserved key for the virtual row that gathers tasks without any tag. It is not
+ * a valid normalized user tag (those never contain '__'), so a real tag literally
+ * named "미분류" stays a distinct row instead of merging into this bucket.
+ */
+export const UNTAGGED_KEY = '__untagged__';
+export const UNTAGGED_DISPLAY = '미분류';
+
 export function normalizeTagKey(tag: string): string {
   return tag.normalize('NFKC').toLocaleLowerCase('en-US');
 }
@@ -20,8 +28,10 @@ export function aggregateTagProgress(
 
   for (const task of uniqueTasks.values()) {
     if (task.status !== 'open' && task.status !== 'completed') continue;
-    const rawTags = task.tags.length > 0 ? task.tags : options.showUntagged ? ['미분류'] : [];
-    if (rawTags.length === 0) continue;
+    const tagEntries = task.tags.length > 0
+      ? task.tags.map((raw) => ({ tagKey: normalizeTagKey(raw), displayName: raw.normalize('NFKC') }))
+      : options.showUntagged ? [{ tagKey: UNTAGGED_KEY, displayName: UNTAGGED_DISPLAY }] : [];
+    if (tagEntries.length === 0) continue;
     const start = task.localStartDate ?? task.localDueDate;
     const due = task.localDueDate ?? task.localStartDate;
     const span = start && due ? clampTaskToMonth(start, due, month) : null;
@@ -29,13 +39,12 @@ export function aggregateTagProgress(
     if (!span && !unscheduled) continue;
 
     const seenTags = new Set<string>();
-    for (const rawTag of rawTags) {
-      const tagKey = normalizeTagKey(rawTag);
+    for (const { tagKey, displayName } of tagEntries) {
       if (seenTags.has(tagKey)) continue;
       seenTags.add(tagKey);
       const row = rows.get(tagKey) ?? {
         tagKey,
-        displayName: rawTag.normalize('NFKC'),
+        displayName,
         completed: 0,
         open: 0,
         total: 0,
