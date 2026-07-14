@@ -5,6 +5,7 @@ export interface TickTickTagProgressSettings {
   showUntagged: boolean;
   projectAliases: Record<string, string>;
   projectsBasePath: string;
+  completionTtlMinutes: number;
 }
 
 export const DEFAULT_SETTINGS: TickTickTagProgressSettings = {
@@ -14,6 +15,7 @@ export const DEFAULT_SETTINGS: TickTickTagProgressSettings = {
   showUntagged: true,
   projectAliases: {},
   projectsBasePath: '90. Settings/Bases/Projects.base',
+  completionTtlMinutes: 30,
 };
 
 interface SecretWriter {
@@ -63,5 +65,9 @@ export function loadSettings(raw: unknown): TickTickTagProgressSettings {
     projectsBasePath: typeof value.projectsBasePath === 'string' && value.projectsBasePath.trim()
       ? value.projectsBasePath.trim()
       : DEFAULT_SETTINGS.projectsBasePath,
+    completionTtlMinutes: typeof value.completionTtlMinutes === 'number'
+      && Number.isFinite(value.completionTtlMinutes) && value.completionTtlMinutes > 0
+      ? value.completionTtlMinutes
+      : DEFAULT_SETTINGS.completionTtlMinutes,
   };
 }

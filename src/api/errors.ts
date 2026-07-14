@@ -1,4 +1,11 @@
-export type TickTickErrorKind = 'auth' | 'rate-limit' | 'server' | 'contract' | 'network';
+export type TickTickErrorKind =
+  | 'auth'
+  | 'rate-limit'
+  | 'server'
+  | 'contract'
+  | 'network'
+  | 'not-found'
+  | 'unknown-outcome';
 
 export class TickTickHttpError extends Error {
   constructor(
@@ -13,6 +20,7 @@ export class TickTickHttpError extends Error {
 
 export function kindForStatus(status: number): TickTickErrorKind {
   if (status === 401 || status === 403) return 'auth';
+  if (status === 404) return 'not-found';
   if (status === 429) return 'rate-limit';
   if (status >= 500) return 'server';
   return 'contract';

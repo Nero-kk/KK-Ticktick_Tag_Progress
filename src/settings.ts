@@ -84,6 +84,19 @@ export class TickTickTagProgressSettingTab extends PluginSettingTab {
       }));
 
     new Setting(containerEl)
+      .setName('완료 처리 허용 시간(분)')
+      .setDesc('마지막 동기화가 이 시간을 넘으면 완료 버튼이 오래된 데이터로 동작하지 않도록 막습니다. 기본 30분.')
+      .addText((text) => text
+        .setValue(String(this.plugin.settings.completionTtlMinutes))
+        .onChange(async (value) => {
+          const minutes = Number(value.trim());
+          if (Number.isFinite(minutes) && minutes > 0) {
+            this.plugin.settings.completionTtlMinutes = minutes;
+            await this.plugin.savePluginData();
+          }
+        }));
+
+    new Setting(containerEl)
       .setName('Projects.base 경로')
       .setDesc('생성된 로컬 노트를 여는 기존 Base입니다. 새 Base는 만들지 않습니다.')
       .addText((text) => text.setValue(this.plugin.settings.projectsBasePath).onChange(async (value) => {

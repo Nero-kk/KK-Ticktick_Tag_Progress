@@ -81,7 +81,10 @@ export class SyncService {
       this.store.accept(snapshot);
       return snapshot;
     } catch (error) {
-      const result = error instanceof TickTickHttpError ? error.kind : 'network';
+      const kind = error instanceof TickTickHttpError ? error.kind : 'network';
+      const result = kind === 'auth' || kind === 'rate-limit' || kind === 'server' || kind === 'contract'
+        ? kind
+        : 'network';
       this.store.recordFailure(selectedMonth, result, error instanceof Error ? error.message : 'unknown');
       throw error;
     }

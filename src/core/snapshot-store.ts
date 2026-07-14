@@ -161,6 +161,10 @@ export class SnapshotStore {
     return snapshot ? clone(snapshot) : undefined;
   }
 
+  listSnapshots(): SyncSnapshot[] {
+    return Object.values(this.state.snapshots).map(clone);
+  }
+
   getLastAttempt(): LastAttempt | undefined {
     return this.state.lastAttempt ? clone(this.state.lastAttempt) : undefined;
   }

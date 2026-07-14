@@ -400,6 +400,13 @@
   background: color-mix(in srgb, var(--background-modifier-error) 18%, transparent);
 }
 
+.ttgp-completion-changed {
+  padding: 10px 12px;
+  border-radius: var(--radius-s);
+  color: var(--text-warning);
+  background: color-mix(in srgb, var(--background-modifier-error) 10%, transparent);
+}
+
 .ttgp-completion-actions {
   display: flex;
   justify-content: flex-end;

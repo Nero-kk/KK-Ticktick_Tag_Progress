@@ -104,6 +104,7 @@ var TickTickHttpError = class extends Error {
 };
 function kindForStatus(status) {
   if (status === 401 || status === 403) return "auth";
+  if (status === 404) return "not-found";
   if (status === 429) return "rate-limit";
   if (status >= 500) return "server";
   return "contract";
@@ -146,7 +147,7 @@ var OfficialOpenApiClient = class {
       );
     });
   }
-  async request(method, path, body) {
+  async request(method, path, body, options = {}) {
     this.guard.assertAllowed(method, path);
     const token = await this.tokenProvider();
     if (!token) throw new TickTickHttpError(401, "auth", "TickTick API token is not configured");
@@ -159,6 +160,7 @@ var OfficialOpenApiClient = class {
       },
       ...body === void 0 ? {} : { body: JSON.stringify(body) }
     };
+    if (options.retry === false) return this.requestOnce(apiRequest);
     for (let attempt = 0; attempt < 4; attempt += 1) {
       let response;
       try {
@@ -179,6 +181,23 @@ var OfficialOpenApiClient = class {
       throw new TickTickHttpError(response.status, kindForStatus(response.status));
     }
     throw new TickTickHttpError(0, "network", "TickTick retry budget exhausted");
+  }
+  /**
+   * Single-shot request for write operations. A completion POST is never retried:
+   * a timeout or 5xx after the request left the client leaves the result
+   * indeterminate, so it surfaces as `unknown-outcome` for the caller to confirm
+   * with an exact read rather than blindly resending.
+   */
+  async requestOnce(apiRequest) {
+    let response;
+    try {
+      response = await this.callWithTimeout(apiRequest);
+    } catch {
+      throw new TickTickHttpError(0, "unknown-outcome", "TickTick write result is unconfirmed");
+    }
+    if (response.status >= 200 && response.status < 300) return response.json;
+    if (response.status >= 500) throw new TickTickHttpError(response.status, "unknown-outcome", "TickTick write result is unconfirmed");
+    throw new TickTickHttpError(response.status, kindForStatus(response.status));
   }
   async getProjects() {
     return this.validate(parseProjects, await this.request("GET", "/project"));
@@ -201,7 +220,9 @@ var OfficialOpenApiClient = class {
   async completeTask(projectId, taskId) {
     await this.request(
       "POST",
-      `/project/${encodeURIComponent(projectId)}/task/${encodeURIComponent(taskId)}/complete`
+      `/project/${encodeURIComponent(projectId)}/task/${encodeURIComponent(taskId)}/complete`,
+      void 0,
+      { retry: false }
     );
   }
 };
@@ -578,6 +599,9 @@ var SnapshotStore = class {
     const snapshot = this.state.snapshots[selectedMonth];
     return snapshot ? clone(snapshot) : void 0;
   }
+  listSnapshots() {
+    return Object.values(this.state.snapshots).map(clone);
+  }
   getLastAttempt() {
     return this.state.lastAttempt ? clone(this.state.lastAttempt) : void 0;
   }
@@ -652,7 +676,8 @@ var SyncService = class {
       this.store.accept(snapshot);
       return snapshot;
     } catch (error) {
-      const result = error instanceof TickTickHttpError ? error.kind : "network";
+      const kind = error instanceof TickTickHttpError ? error.kind : "network";
+      const result = kind === "auth" || kind === "rate-limit" || kind === "server" || kind === "contract" ? kind : "network";
       this.store.recordFailure(selectedMonth, result, error instanceof Error ? error.message : "unknown");
       throw error;
     }
@@ -671,20 +696,49 @@ var TaskCompletionService = class {
     this.api = api;
     this.synchronizer = synchronizer;
   }
-  inFlight = /* @__PURE__ */ new Map();
-  completeAndRefresh(month, task) {
-    if (task.status !== "open") return Promise.resolve();
-    const key2 = `${task.projectId}:${task.id}`;
-    const existing = this.inFlight.get(key2);
-    if (existing) return existing;
-    const operation = this.run(month, task).finally(() => {
-      if (this.inFlight.get(key2) === operation) this.inFlight.delete(key2);
-    });
-    this.inFlight.set(key2, operation);
-    return operation;
+  async preflight(task) {
+    let live;
+    try {
+      live = await this.api.getTask(task.projectId, task.id);
+    } catch (error) {
+      if (error instanceof TickTickHttpError && error.kind === "not-found") return { status: "not-found" };
+      throw error;
+    }
+    if (live.status !== "open") return { status: "already-completed", live };
+    const changed = live.title !== task.title || live.projectId !== task.projectId;
+    return { status: "ready", live, changed };
   }
-  async run(month, task) {
-    await this.api.completeTask(task.projectId, task.id);
+  async complete(month, task) {
+    try {
+      await this.api.completeTask(task.projectId, task.id);
+    } catch (error) {
+      if (error instanceof TickTickHttpError && error.kind === "unknown-outcome") return { status: "unknown" };
+      throw error;
+    }
+    let verifiedStillOpen = false;
+    try {
+      const live = await this.api.getTask(task.projectId, task.id);
+      verifiedStillOpen = live.status === "open";
+    } catch {
+    }
+    await this.refresh(month);
+    return verifiedStillOpen ? { status: "completed-unverified" } : { status: "completed" };
+  }
+  async confirmOutcome(month, task) {
+    let live;
+    try {
+      live = await this.api.getTask(task.projectId, task.id);
+    } catch (error) {
+      if (error instanceof TickTickHttpError && error.kind === "not-found") return { status: "not-found" };
+      throw error;
+    }
+    if (live.status !== "open") {
+      await this.refresh(month);
+      return { status: "completed" };
+    }
+    return { status: "still-open" };
+  }
+  async refresh(month) {
     try {
       await this.synchronizer.sync(month);
     } catch (error) {
@@ -953,7 +1007,8 @@ var DEFAULT_SETTINGS = {
   excludeTags: [],
   showUntagged: true,
   projectAliases: {},
-  projectsBasePath: "90. Settings/Bases/Projects.base"
+  projectsBasePath: "90. Settings/Bases/Projects.base",
+  completionTtlMinutes: 30
 };
 function validSecretId(value) {
   return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value);
@@ -983,7 +1038,8 @@ function loadSettings(raw) {
     excludeTags: stringArray2(value.excludeTags),
     showUntagged: Object.prototype.hasOwnProperty.call(value, "showUntagged") ? value.showUntagged === true : DEFAULT_SETTINGS.showUntagged,
     projectAliases: aliases(value.projectAliases),
-    projectsBasePath: typeof value.projectsBasePath === "string" && value.projectsBasePath.trim() ? value.projectsBasePath.trim() : DEFAULT_SETTINGS.projectsBasePath
+    projectsBasePath: typeof value.projectsBasePath === "string" && value.projectsBasePath.trim() ? value.projectsBasePath.trim() : DEFAULT_SETTINGS.projectsBasePath,
+    completionTtlMinutes: typeof value.completionTtlMinutes === "number" && Number.isFinite(value.completionTtlMinutes) && value.completionTtlMinutes > 0 ? value.completionTtlMinutes : DEFAULT_SETTINGS.completionTtlMinutes
   };
 }
 
@@ -1039,6 +1095,13 @@ var TickTickTagProgressSettingTab = class extends import_obsidian2.PluginSetting
       this.plugin.settings.showUntagged = value;
       await this.plugin.savePluginData();
       this.plugin.refreshViews();
+    }));
+    new import_obsidian2.Setting(containerEl).setName("\uC644\uB8CC \uCC98\uB9AC \uD5C8\uC6A9 \uC2DC\uAC04(\uBD84)").setDesc("\uB9C8\uC9C0\uB9C9 \uB3D9\uAE30\uD654\uAC00 \uC774 \uC2DC\uAC04\uC744 \uB118\uC73C\uBA74 \uC644\uB8CC \uBC84\uD2BC\uC774 \uC624\uB798\uB41C \uB370\uC774\uD130\uB85C \uB3D9\uC791\uD558\uC9C0 \uC54A\uB3C4\uB85D \uB9C9\uC2B5\uB2C8\uB2E4. \uAE30\uBCF8 30\uBD84.").addText((text) => text.setValue(String(this.plugin.settings.completionTtlMinutes)).onChange(async (value) => {
+      const minutes = Number(value.trim());
+      if (Number.isFinite(minutes) && minutes > 0) {
+        this.plugin.settings.completionTtlMinutes = minutes;
+        await this.plugin.savePluginData();
+      }
     }));
     new import_obsidian2.Setting(containerEl).setName("Projects.base \uACBD\uB85C").setDesc("\uC0DD\uC131\uB41C \uB85C\uCEEC \uB178\uD2B8\uB97C \uC5EC\uB294 \uAE30\uC874 Base\uC785\uB2C8\uB2E4. \uC0C8 Base\uB294 \uB9CC\uB4E4\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.").addText((text) => text.setValue(this.plugin.settings.projectsBasePath).onChange(async (value) => {
       this.plugin.settings.projectsBasePath = value.trim();
@@ -1264,11 +1327,14 @@ var GanttDashboardView = class extends import_obsidian3.ItemView {
 // src/ui/task-completion-modal.ts
 var import_obsidian4 = require("obsidian");
 var TaskCompletionModal = class extends import_obsidian4.Modal {
-  constructor(app, task, onConfirm) {
+  constructor(app, task, handlers) {
     super(app);
     this.task = task;
-    this.onConfirm = onConfirm;
+    this.handlers = handlers;
   }
+  error;
+  note;
+  controls;
   onOpen() {
     this.setTitle("TickTick \uC644\uB8CC \uCC98\uB9AC \uD655\uC778");
     this.modalEl.addClass("ttgp-completion-modal");
@@ -1281,37 +1347,95 @@ var TaskCompletionModal = class extends import_obsidian4.Modal {
     this.addPreviewRow(preview, "\uD0DC\uC2A4\uD06C", this.task.title);
     this.addPreviewRow(preview, "\uD504\uB85C\uC81D\uD2B8", this.task.projectName);
     this.addPreviewRow(preview, "\uBCC0\uACBD", "\uBBF8\uC644\uB8CC \u2192 \uC644\uB8CC");
-    const note = document.createElement("p");
-    note.className = "ttgp-completion-note";
-    note.textContent = "\uC644\uB8CC \uCC98\uB9AC \uD6C4 \uD604\uC7AC \uC6D4 \uB370\uC774\uD130\uB97C \uB2E4\uC2DC \uB3D9\uAE30\uD654\uD569\uB2C8\uB2E4.";
-    const error = document.createElement("p");
-    error.className = "ttgp-completion-error";
-    error.setAttribute("role", "alert");
-    error.hidden = true;
-    const controls = document.createElement("div");
-    controls.className = "ttgp-completion-actions";
-    const cancel = new import_obsidian4.ButtonComponent(controls).setButtonText("\uCDE8\uC18C").onClick(() => this.close());
-    const confirm = new import_obsidian4.ButtonComponent(controls).setButtonText("TickTick\uC5D0\uC11C \uC644\uB8CC \uCC98\uB9AC").setCta().onClick(() => {
-      void submit();
-    });
-    const submit = async () => {
-      cancel.setDisabled(true);
-      confirm.setDisabled(true).setButtonText("\uC644\uB8CC \uCC98\uB9AC \uC911\u2026");
-      error.hidden = true;
-      try {
-        await this.onConfirm();
-        this.close();
-      } catch (reason) {
-        error.textContent = reason instanceof Error ? reason.message : "\uC644\uB8CC \uCC98\uB9AC\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.";
-        error.hidden = false;
-        cancel.setDisabled(false);
-        confirm.setDisabled(false).setButtonText("\uB2E4\uC2DC \uC2DC\uB3C4");
-      }
-    };
-    this.contentEl.append(intro, preview, note, error, controls);
+    if (this.task.changed) {
+      const changed = document.createElement("p");
+      changed.className = "ttgp-completion-changed";
+      changed.setAttribute("role", "alert");
+      changed.textContent = "\uC774 \uD0DC\uC2A4\uD06C\uC758 \uC81C\uBAA9 \uB610\uB294 \uD504\uB85C\uC81D\uD2B8\uAC00 \uB9C8\uC9C0\uB9C9 \uB3D9\uAE30\uD654 \uC774\uD6C4 \uBC14\uB00C\uC5C8\uC2B5\uB2C8\uB2E4. \uC704 \uCD5C\uC2E0 \uAC12\uC744 \uD655\uC778\uD558\uACE0 \uC9C4\uD589\uD558\uC138\uC694.";
+      this.contentEl.append(changed);
+    }
+    this.note = document.createElement("p");
+    this.note.className = "ttgp-completion-note";
+    this.note.textContent = "\uC644\uB8CC \uCC98\uB9AC \uC9C1\uC804\uACFC \uC9C1\uD6C4\uC5D0 TickTick \uC6D0\uBCF8 \uC0C1\uD0DC\uB97C \uB2E4\uC2DC \uD655\uC778\uD569\uB2C8\uB2E4.";
+    this.error = document.createElement("p");
+    this.error.className = "ttgp-completion-error";
+    this.error.setAttribute("role", "alert");
+    this.error.hidden = true;
+    this.controls = document.createElement("div");
+    this.controls.className = "ttgp-completion-actions";
+    this.contentEl.append(intro, preview, this.note, this.error, this.controls);
+    this.renderConfirmControls();
   }
   onClose() {
     this.contentEl.replaceChildren();
+  }
+  renderConfirmControls() {
+    this.controls.replaceChildren();
+    const cancel = new import_obsidian4.ButtonComponent(this.controls).setButtonText("\uCDE8\uC18C").onClick(() => this.close());
+    const confirm = new import_obsidian4.ButtonComponent(this.controls).setButtonText("TickTick\uC5D0\uC11C \uC644\uB8CC \uCC98\uB9AC").setCta().onClick(() => {
+      void run();
+    });
+    const run = async () => {
+      cancel.setDisabled(true);
+      confirm.setDisabled(true).setButtonText("\uC644\uB8CC \uCC98\uB9AC \uC911\u2026");
+      this.error.hidden = true;
+      let result;
+      try {
+        result = await this.handlers.onConfirm();
+      } catch (reason) {
+        this.showError(reason instanceof Error ? reason.message : "\uC644\uB8CC \uCC98\uB9AC\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.");
+        cancel.setDisabled(false);
+        confirm.setDisabled(false).setButtonText("\uB2E4\uC2DC \uC2DC\uB3C4");
+        return;
+      }
+      if (result.state === "completed") {
+        this.close();
+        return;
+      }
+      if (result.state === "unknown") {
+        this.renderUnknownState(result.message);
+        return;
+      }
+      this.showError(result.message);
+      cancel.setDisabled(false);
+      confirm.setDisabled(false).setButtonText("\uB2E4\uC2DC \uC2DC\uB3C4");
+    };
+  }
+  renderUnknownState(message) {
+    this.note.textContent = "\uC790\uB3D9 \uC7AC\uC2DC\uB3C4\uB97C \uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. TickTick \uBC18\uC601 \uC5EC\uBD80\uB97C \uD655\uC778\uD55C \uB4A4\uC5D0\uB9CC \uB2E4\uC2DC \uC2DC\uB3C4\uD558\uC138\uC694.";
+    this.showError(message);
+    this.controls.replaceChildren();
+    new import_obsidian4.ButtonComponent(this.controls).setButtonText("\uB2EB\uAE30").onClick(() => this.close());
+    const check = new import_obsidian4.ButtonComponent(this.controls).setButtonText("\uC0C1\uD0DC \uD655\uC778").setCta().onClick(() => {
+      void run();
+    });
+    const run = async () => {
+      check.setDisabled(true).setButtonText("\uD655\uC778 \uC911\u2026");
+      let result;
+      try {
+        result = await this.handlers.onConfirmOutcome();
+      } catch (reason) {
+        this.showError(reason instanceof Error ? reason.message : "\uC0C1\uD0DC \uD655\uC778\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.");
+        check.setDisabled(false).setButtonText("\uC0C1\uD0DC \uD655\uC778");
+        return;
+      }
+      if (result.state === "completed") {
+        this.close();
+        return;
+      }
+      if (result.state === "still-open") {
+        this.note.textContent = result.message;
+        this.error.hidden = true;
+        this.renderConfirmControls();
+        return;
+      }
+      this.showError(result.message);
+      check.setDisabled(false).setButtonText("\uC0C1\uD0DC \uD655\uC778");
+    };
+  }
+  showError(message) {
+    this.error.textContent = message;
+    this.error.hidden = false;
   }
   addPreviewRow(container, label, value) {
     const term = document.createElement("dt");
@@ -1350,7 +1474,16 @@ var TickTickTagProgressPlugin = class extends import_obsidian5.Plugin {
       transport
     );
     this.syncService = new SyncService(this.api, this.snapshotStore);
-    this.taskCompletion = new TaskCompletionService(this.api, this.syncService);
+    this.taskCompletion = new TaskCompletionService(
+      {
+        getTask: async (projectId, taskId) => normalizeTask(
+          await this.api.getTask(projectId, taskId),
+          this.projectNameFor(projectId)
+        ),
+        completeTask: (projectId, taskId) => this.api.completeTask(projectId, taskId)
+      },
+      { sync: (month) => this.syncService.sync(month) }
+    );
     this.taskNotes = new TaskNoteRepository(new ObsidianTaskNotePort(this.app), this.settings.projectAliases);
     this.registerView(DASHBOARD_VIEW_TYPE, (leaf) => new GanttDashboardView(leaf, this));
     this.addRibbonIcon("chart-gantt", "TickTick \uD0DC\uADF8 \uC9C4\uD589\uB960", () => {
@@ -1467,10 +1600,20 @@ var TickTickTagProgressPlugin = class extends import_obsidian5.Plugin {
       new import_obsidian5.Notice(error instanceof Error ? `\uD0DC\uC2A4\uD06C \uB178\uD2B8\uB97C \uC5F4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: ${error.message}` : "\uD0DC\uC2A4\uD06C \uB178\uD2B8\uB97C \uC5F4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.", 8e3);
     }
   }
+  projectNameFor(projectId) {
+    for (const snapshot of this.snapshotStore.listSnapshots()) {
+      const match = snapshot.tasks.find((task) => task.projectId === projectId);
+      if (match) return match.projectName;
+    }
+    return projectId;
+  }
   requestTaskCompletion(month, taskId) {
+    void this.beginTaskCompletion(month, taskId);
+  }
+  async beginTaskCompletion(month, taskId) {
     const snapshot = this.snapshotStore.getLastGood(month);
     const task = snapshot?.tasks.find((candidate) => candidate.id === taskId);
-    if (!task) {
+    if (!snapshot || !task) {
       new import_obsidian5.Notice("\uC120\uD0DD\uD55C \uD0DC\uC2A4\uD06C\uAC00 \uD604\uC7AC snapshot\uC5D0 \uC5C6\uC2B5\uB2C8\uB2E4. \uB2E4\uC2DC \uB3D9\uAE30\uD654\uD558\uC138\uC694.");
       return;
     }
@@ -1482,31 +1625,104 @@ var TickTickTagProgressPlugin = class extends import_obsidian5.Plugin {
       new import_obsidian5.Notice("\uD604\uC7AC \uB3D9\uAE30\uD654\uAC00 \uB05D\uB09C \uB4A4 \uB2E4\uC2DC \uC2DC\uB3C4\uD558\uC138\uC694.");
       return;
     }
-    new TaskCompletionModal(this.app, task, async () => {
-      await this.completeTaskAndRefresh(month, task);
-    }).open();
-  }
-  async completeTaskAndRefresh(month, task) {
-    if (this.syncing) throw new Error("\uD604\uC7AC \uB3D9\uAE30\uD654\uAC00 \uB05D\uB09C \uB4A4 \uB2E4\uC2DC \uC2DC\uB3C4\uD558\uC138\uC694.");
-    this.syncing = true;
-    this.refreshViews();
-    try {
-      await this.taskCompletion.completeAndRefresh(month, task);
-      await this.savePluginData();
-      new import_obsidian5.Notice(`\u201C${task.title}\u201D\uC744 TickTick\uC5D0\uC11C \uC644\uB8CC \uCC98\uB9AC\uD588\uC2B5\uB2C8\uB2E4.`);
-    } catch (error) {
-      await this.savePluginData();
-      if (error instanceof CompletionRefreshError) {
-        new import_obsidian5.Notice("TickTick \uC644\uB8CC \uCC98\uB9AC\uB294 \uC131\uACF5\uD588\uC9C0\uB9CC \uD654\uBA74 \uC7AC\uB3D9\uAE30\uD654\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4. \uB3D9\uAE30\uD654 \uBC84\uD2BC\uC744 \uB2E4\uC2DC \uB204\uB974\uC138\uC694.", 9e3);
-        return;
-      }
-      const message = error instanceof TickTickHttpError && error.kind === "auth" ? "TickTick \uC778\uC99D\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4. API \uD1A0\uD070\uC744 \uD655\uC778\uD558\uC138\uC694." : "TickTick \uC644\uB8CC \uCC98\uB9AC\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4. \uD0DC\uC2A4\uD06C\uB294 \uBCC0\uACBD\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.";
-      new import_obsidian5.Notice(message, 8e3);
-      throw new Error(message);
-    } finally {
-      this.syncing = false;
-      this.refreshViews();
+    if (snapshot.coverage.status !== "complete") {
+      new import_obsidian5.Notice("\uC870\uD68C \uBC94\uC704\uAC00 \uC81C\uD55C\uC801\uC785\uB2C8\uB2E4. \uB2E4\uC2DC \uB3D9\uAE30\uD654\uD55C \uB4A4 \uC644\uB8CC \uCC98\uB9AC\uD558\uC138\uC694.", 8e3);
+      return;
     }
+    const lastAttempt = this.snapshotStore.getLastAttempt();
+    if (lastAttempt && lastAttempt.selectedMonth === month && lastAttempt.result !== "success" && lastAttempt.attemptedAt > snapshot.generatedAt) {
+      new import_obsidian5.Notice("\uB9C8\uC9C0\uB9C9 \uB3D9\uAE30\uD654\uAC00 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4. \uB2E4\uC2DC \uB3D9\uAE30\uD654\uD55C \uB4A4 \uC644\uB8CC \uCC98\uB9AC\uD558\uC138\uC694.", 8e3);
+      return;
+    }
+    const ageMinutes = (Date.now() - Date.parse(snapshot.generatedAt)) / 6e4;
+    if (!Number.isFinite(ageMinutes) || ageMinutes > this.settings.completionTtlMinutes) {
+      new import_obsidian5.Notice(`\uB370\uC774\uD130\uAC00 \uC624\uB798\uB418\uC5C8\uC2B5\uB2C8\uB2E4. \uB2E4\uC2DC \uB3D9\uAE30\uD654\uD55C \uB4A4 \uC644\uB8CC \uCC98\uB9AC\uD558\uC138\uC694.`, 8e3);
+      return;
+    }
+    let preflight;
+    try {
+      preflight = await this.taskCompletion.preflight(task);
+    } catch (error) {
+      new import_obsidian5.Notice(this.completionErrorMessage(error), 8e3);
+      return;
+    }
+    if (preflight.status === "not-found") {
+      new import_obsidian5.Notice("\uD0DC\uC2A4\uD06C\uAC00 \uC0AD\uC81C\uB418\uC5C8\uAC70\uB098 \uC774\uB3D9\uB418\uC5C8\uC2B5\uB2C8\uB2E4. \uB2E4\uC2DC \uB3D9\uAE30\uD654\uD558\uC138\uC694.", 8e3);
+      return;
+    }
+    if (preflight.status === "already-completed") {
+      new import_obsidian5.Notice("\uC774\uBBF8 \uC644\uB8CC\uB41C \uD0DC\uC2A4\uD06C\uC785\uB2C8\uB2E4. \uB2E4\uC2DC \uB3D9\uAE30\uD654\uD558\uC138\uC694.");
+      return;
+    }
+    const live = preflight.live;
+    const target = { id: live.id, projectId: live.projectId, title: live.title, status: live.status };
+    new TaskCompletionModal(
+      this.app,
+      { title: live.title, projectName: live.projectName, changed: preflight.changed },
+      {
+        onConfirm: async () => {
+          this.syncing = true;
+          this.refreshViews();
+          try {
+            const result = await this.taskCompletion.complete(month, target);
+            if (result.status === "unknown") {
+              return { state: "unknown", message: "\uC644\uB8CC \uC694\uCCAD\uC774 \uC2DC\uAC04 \uCD08\uACFC\uB410\uC2B5\uB2C8\uB2E4. TickTick \uBC18\uC601 \uC5EC\uBD80\uAC00 \uD655\uC815\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4." };
+            }
+            await this.savePluginData();
+            if (result.status === "completed-unverified") {
+              new import_obsidian5.Notice(`\u201C${live.title}\u201D \uC644\uB8CC \uC694\uCCAD\uC740 \uC804\uC1A1\uD588\uC73C\uB098 \uBC18\uC601\uC744 \uD655\uC778\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uB3D9\uAE30\uD654\uB85C \uD655\uC778\uD558\uC138\uC694.`, 9e3);
+            } else {
+              new import_obsidian5.Notice(`\u201C${live.title}\u201D\uC744 TickTick\uC5D0\uC11C \uC644\uB8CC \uCC98\uB9AC\uD588\uC2B5\uB2C8\uB2E4.`);
+            }
+            return { state: "completed" };
+          } catch (error) {
+            if (error instanceof CompletionRefreshError) {
+              await this.savePluginData();
+              new import_obsidian5.Notice("TickTick \uC644\uB8CC \uCC98\uB9AC\uB294 \uC131\uACF5\uD588\uC9C0\uB9CC \uD654\uBA74 \uC7AC\uB3D9\uAE30\uD654\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4. \uB3D9\uAE30\uD654 \uBC84\uD2BC\uC744 \uB2E4\uC2DC \uB204\uB974\uC138\uC694.", 9e3);
+              return { state: "completed" };
+            }
+            return { state: "error", message: this.completionErrorMessage(error) };
+          } finally {
+            this.syncing = false;
+            this.refreshViews();
+          }
+        },
+        onConfirmOutcome: async () => {
+          this.syncing = true;
+          this.refreshViews();
+          try {
+            const outcome = await this.taskCompletion.confirmOutcome(month, target);
+            if (outcome.status === "completed") {
+              await this.savePluginData();
+              new import_obsidian5.Notice(`\u201C${live.title}\u201D\uC774 TickTick\uC5D0\uC11C \uC644\uB8CC\uB418\uC5B4 \uC788\uC5C8\uC2B5\uB2C8\uB2E4.`);
+              return { state: "completed" };
+            }
+            if (outcome.status === "not-found") {
+              return { state: "error", message: "\uD0DC\uC2A4\uD06C\uAC00 \uC0AD\uC81C\uB418\uC5C8\uAC70\uB098 \uC774\uB3D9\uB418\uC5C8\uC2B5\uB2C8\uB2E4. \uB2E4\uC2DC \uB3D9\uAE30\uD654\uD558\uC138\uC694." };
+            }
+            return { state: "still-open", message: "\uC544\uC9C1 \uC644\uB8CC\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4. \uD544\uC694\uD558\uBA74 \uB2E4\uC2DC \uC644\uB8CC \uCC98\uB9AC\uB97C \uC2DC\uB3C4\uD558\uC138\uC694." };
+          } catch (error) {
+            if (error instanceof CompletionRefreshError) {
+              await this.savePluginData();
+              new import_obsidian5.Notice("\uC644\uB8CC\uB294 \uD655\uC778\uB410\uC9C0\uB9CC \uD654\uBA74 \uC7AC\uB3D9\uAE30\uD654\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4. \uB3D9\uAE30\uD654 \uBC84\uD2BC\uC744 \uB2E4\uC2DC \uB204\uB974\uC138\uC694.", 9e3);
+              return { state: "completed" };
+            }
+            return { state: "error", message: this.completionErrorMessage(error) };
+          } finally {
+            this.syncing = false;
+            this.refreshViews();
+          }
+        }
+      }
+    ).open();
+  }
+  completionErrorMessage(error) {
+    if (error instanceof TickTickHttpError) {
+      if (error.kind === "auth") return "TickTick \uC778\uC99D\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4. API \uD1A0\uD070\uC744 \uD655\uC778\uD558\uC138\uC694.";
+      if (error.kind === "not-found") return "\uD0DC\uC2A4\uD06C\uAC00 \uC0AD\uC81C\uB418\uC5C8\uAC70\uB098 \uC774\uB3D9\uB418\uC5C8\uC2B5\uB2C8\uB2E4. \uB2E4\uC2DC \uB3D9\uAE30\uD654\uD558\uC138\uC694.";
+      if (error.kind === "rate-limit") return "TickTick \uC694\uCCAD\uC774 \uC81C\uD55C\uB418\uC5C8\uC2B5\uB2C8\uB2E4. \uC7A0\uC2DC \uD6C4 \uB2E4\uC2DC \uC2DC\uB3C4\uD558\uC138\uC694.";
+    }
+    return "TickTick \uC644\uB8CC \uCC98\uB9AC\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4. \uD0DC\uC2A4\uD06C\uB294 \uBCC0\uACBD\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.";
   }
   async ensureProjectsBase() {
     const path = (0, import_obsidian5.normalizePath)(this.settings.projectsBasePath);
