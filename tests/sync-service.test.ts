@@ -15,7 +15,7 @@ describe('SyncService', () => {
     let calls = 0;
     const api: SyncApi = {
       getProjects: () => { calls += 1; return projects.promise; },
-      getTags: async () => [], getProjectData: async () => ({ project: { id: 'p', name: 'P' }, tasks: [], columns: [] }),
+      getProjectData: async () => ({ project: { id: 'p', name: 'P' }, tasks: [], columns: [] }),
       filterTasks: async () => [], getCompletedTasks: async () => [],
     };
     const service = new SyncService(api, new SnapshotStore());
@@ -27,10 +27,31 @@ describe('SyncService', () => {
     expect(first).toBe(second);
   });
 
+  it('does not reuse an in-flight sync across different months', async () => {
+    const gate = deferred<void>();
+    const seenMonths: string[] = [];
+    const api: SyncApi = {
+      getProjects: async () => { await gate.promise; return [{ id: 'p', name: 'P' }]; },
+      getProjectData: async () => ({ project: { id: 'p', name: 'P' }, tasks: [], columns: [] }),
+      filterTasks: async (filter) => { seenMonths.push(filter.startDate ?? ''); return []; },
+      getCompletedTasks: async () => [],
+    };
+    const service = new SyncService(api, new SnapshotStore());
+    const july = service.sync('2026-07');
+    const august = service.sync('2026-08');
+    expect(july).not.toBe(august);
+    gate.resolve();
+    const [julySnapshot, augustSnapshot] = await Promise.all([july, august]);
+    expect(julySnapshot.selectedMonth).toBe('2026-07');
+    expect(augustSnapshot.selectedMonth).toBe('2026-08');
+    expect(seenMonths).toContain('2026-06-30');
+    expect(seenMonths).toContain('2026-07-31');
+  });
+
   it('keeps last-good when a required call fails', async () => {
     const store = new SnapshotStore();
     const api: SyncApi = {
-      getProjects: async () => [{ id: 'p', name: 'P' }], getTags: async () => [],
+      getProjects: async () => [{ id: 'p', name: 'P' }],
       getProjectData: async () => { throw new Error('offline'); }, filterTasks: async () => [], getCompletedTasks: async () => [],
     };
     const service = new SyncService(api, store);
@@ -42,7 +63,7 @@ describe('SyncService', () => {
   it('strips task content from the persisted snapshot', async () => {
     const store = new SnapshotStore();
     const api: SyncApi = {
-      getProjects: async () => [{ id: 'p', name: 'P' }], getTags: async () => [],
+      getProjects: async () => [{ id: 'p', name: 'P' }],
       getProjectData: async () => ({ project: { id: 'p', name: 'P' }, columns: [], tasks: [{ id: 't', projectId: 'p', title: 'T', content: 'private body', priority: 0, status: 0 }] }),
       filterTasks: async () => [], getCompletedTasks: async () => [],
     };
@@ -55,7 +76,7 @@ describe('SyncService', () => {
     const store = new SnapshotStore();
     const captured: Array<{ startDate?: string; endDate?: string }> = [];
     const api: SyncApi = {
-      getProjects: async () => [{ id: 'p', name: 'P' }], getTags: async () => [],
+      getProjects: async () => [{ id: 'p', name: 'P' }],
       getProjectData: async () => ({ project: { id: 'p', name: 'P' }, columns: [], tasks: [] }),
       filterTasks: async (filter) => {
         captured.push({ startDate: filter.startDate, endDate: filter.endDate });
@@ -74,7 +95,7 @@ describe('SyncService', () => {
   it('keeps only project-data tasks that overlap the selected month or are unscheduled', async () => {
     const store = new SnapshotStore();
     const api: SyncApi = {
-      getProjects: async () => [{ id: 'p', name: 'P' }], getTags: async () => [],
+      getProjects: async () => [{ id: 'p', name: 'P' }],
       getProjectData: async () => ({
         project: { id: 'p', name: 'P' }, columns: [], tasks: [
           { id: 'july', projectId: 'p', title: 'July', priority: 0, status: 0, startDate: '2026-07-01', dueDate: '2026-07-31' },

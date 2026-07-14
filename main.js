@@ -592,17 +592,19 @@ var SyncService = class {
     this.api = api;
     this.store = store;
   }
-  inFlight = null;
+  inFlight = /* @__PURE__ */ new Map();
   sync(selectedMonth) {
-    if (this.inFlight) return this.inFlight;
-    this.inFlight = this.performSync(selectedMonth).finally(() => {
-      this.inFlight = null;
+    const existing = this.inFlight.get(selectedMonth);
+    if (existing) return existing;
+    const flight = this.performSync(selectedMonth).finally(() => {
+      if (this.inFlight.get(selectedMonth) === flight) this.inFlight.delete(selectedMonth);
     });
-    return this.inFlight;
+    this.inFlight.set(selectedMonth, flight);
+    return flight;
   }
   async performSync(selectedMonth) {
     try {
-      const [projects] = await Promise.all([this.api.getProjects(), this.api.getTags()]);
+      const projects = await this.api.getProjects();
       const projectIds = projects.filter((project) => !project.closed).map((project) => project.id);
       const queryRange = getQueryRange(selectedMonth);
       const [projectData, filtered, completed] = await Promise.all([
@@ -640,7 +642,7 @@ var SyncService = class {
           status: "complete",
           selectedMonth,
           projectIds,
-          successfulCalls: ["project", "tag", ...projectIds.map((id) => `project/${id}/data`), "task/filter", "task/completed"],
+          successfulCalls: ["project", ...projectIds.map((id) => `project/${id}/data`), "task/filter", "task/completed"],
           failedCalls: [],
           openTaskCount: tasks.filter((task) => task.status === "open").length,
           completedTaskCount: tasks.filter((task) => task.status === "completed").length

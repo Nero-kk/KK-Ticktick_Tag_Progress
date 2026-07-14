@@ -3,7 +3,6 @@ import type {
   TaskFilter,
   TickTickProject,
   TickTickProjectData,
-  TickTickTag,
   TickTickTask,
 } from '../api/contracts';
 import { TickTickHttpError } from '../api/errors';
@@ -14,26 +13,29 @@ import { SnapshotStore } from './snapshot-store';
 
 export interface SyncApi {
   getProjects(): Promise<TickTickProject[]>;
-  getTags(): Promise<TickTickTag[]>;
   getProjectData(projectId: string): Promise<TickTickProjectData>;
   filterTasks(filter: TaskFilter): Promise<TickTickTask[]>;
   getCompletedTasks(filter: Pick<TaskFilter, 'projectIds' | 'startDate' | 'endDate'>): Promise<TickTickTask[]>;
 }
 
 export class SyncService {
-  private inFlight: Promise<SyncSnapshot> | null = null;
+  private readonly inFlight = new Map<string, Promise<SyncSnapshot>>();
 
   constructor(private readonly api: SyncApi, private readonly store: SnapshotStore) {}
 
   sync(selectedMonth: string): Promise<SyncSnapshot> {
-    if (this.inFlight) return this.inFlight;
-    this.inFlight = this.performSync(selectedMonth).finally(() => { this.inFlight = null; });
-    return this.inFlight;
+    const existing = this.inFlight.get(selectedMonth);
+    if (existing) return existing;
+    const flight = this.performSync(selectedMonth).finally(() => {
+      if (this.inFlight.get(selectedMonth) === flight) this.inFlight.delete(selectedMonth);
+    });
+    this.inFlight.set(selectedMonth, flight);
+    return flight;
   }
 
   private async performSync(selectedMonth: string): Promise<SyncSnapshot> {
     try {
-      const [projects] = await Promise.all([this.api.getProjects(), this.api.getTags()]);
+      const projects = await this.api.getProjects();
       const projectIds = projects.filter((project) => !project.closed).map((project) => project.id);
       const queryRange = getQueryRange(selectedMonth);
       const [projectData, filtered, completed] = await Promise.all([
@@ -69,7 +71,7 @@ export class SyncService {
         generatedAt,
         coverage: {
           status: 'complete', selectedMonth, projectIds,
-          successfulCalls: ['project', 'tag', ...projectIds.map((id) => `project/${id}/data`), 'task/filter', 'task/completed'],
+          successfulCalls: ['project', ...projectIds.map((id) => `project/${id}/data`), 'task/filter', 'task/completed'],
           failedCalls: [],
           openTaskCount: tasks.filter((task) => task.status === 'open').length,
           completedTaskCount: tasks.filter((task) => task.status === 'completed').length,
