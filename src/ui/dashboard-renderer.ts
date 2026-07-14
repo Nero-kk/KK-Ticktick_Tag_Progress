@@ -35,6 +35,15 @@ export interface DashboardActions {
   onOpenHub(tagKey: string): void;
 }
 
+const STAGNATION_DAYS = 7;
+
+function daysSince(iso: string | undefined, now: number = Date.now()): number | null {
+  if (!iso) return null;
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return null;
+  return Math.max(0, Math.floor((now - then) / 86_400_000));
+}
+
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string): HTMLElementTagNameMap[K] {
   const el = document.createElement(tag);
   if (className) el.className = className;
@@ -166,6 +175,12 @@ function renderRows(root: HTMLElement, model: DashboardModel, actions: Dashboard
     }
     const progress = element('div', 'ttgp-progress-cell');
     progress.append(element('strong', 'ttgp-fraction', `${row.completed}/${row.total}`), element('span', 'ttgp-percent', `${row.percent}%`));
+    if (row.total > 0) {
+      const days = daysSince(row.lastCompletedAt);
+      const stagnation = element('span', 'ttgp-last-completed', days === null ? '이번 달 완료 없음' : `마지막 완료 ${days}일 전`);
+      if (days !== null && days >= STAGNATION_DAYS) stagnation.classList.add('is-stale');
+      progress.append(stagnation);
+    }
     const timeline = element('div', 'ttgp-timeline-cell');
     timeline.style.setProperty('--tt-days', String(dayCount));
     if (row.total === 0 || row.visibleStartDay === undefined || row.visibleEndDay === undefined) {

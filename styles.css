@@ -190,6 +190,15 @@
   border-color: var(--interactive-accent);
 }
 
+.ttgp-last-completed {
+  font-size: 0.7em;
+  color: var(--ttgp-muted);
+}
+
+.ttgp-last-completed.is-stale {
+  color: var(--text-warning);
+}
+
 .ttgp-grid-header {
   min-height: 48px;
   border-bottom: 2px solid color-mix(in srgb, var(--ttgp-line) 65%, var(--ttgp-ink));

@@ -106,5 +106,6 @@ export interface TagProgress {
   clippedAfterMonth: boolean;
   hasUnscheduledTasks: boolean;
   unscheduledCount: number;
+  lastCompletedAt?: string;
   taskIds: string[];
 }

@@ -3,6 +3,7 @@ import { clampTaskToMonth } from './period';
 
 interface MutableRow extends TagProgress {
   taskIdSet: Set<string>;
+  lastCompletedMs?: number;
 }
 
 /**
@@ -79,6 +80,13 @@ export function aggregateTagProgress(
       if (!row.taskIdSet.has(task.id)) {
         row.taskIdSet.add(task.id);
         row.taskIds.push(task.id);
+        if (task.status === 'completed' && task.completedAt) {
+          const completedMs = Date.parse(task.completedAt);
+          if (Number.isFinite(completedMs) && (row.lastCompletedMs === undefined || completedMs > row.lastCompletedMs)) {
+            row.lastCompletedMs = completedMs;
+            row.lastCompletedAt = task.completedAt;
+          }
+        }
         if (unscheduled) {
           row.hasUnscheduledTasks = true;
           row.unscheduledCount += 1;
@@ -99,5 +107,5 @@ export function aggregateTagProgress(
   return [...rows.values()]
     .filter((row) => row.total > 0 || row.unscheduledCount > 0)
     .sort((a, b) => a.tagKey.localeCompare(b.tagKey))
-    .map(({ taskIdSet: _taskIdSet, ...row }) => row);
+    .map(({ taskIdSet: _taskIdSet, lastCompletedMs: _lastCompletedMs, ...row }) => row);
 }

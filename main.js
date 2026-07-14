@@ -428,6 +428,13 @@ function aggregateTagProgress(input, month, options = {}) {
       if (!row.taskIdSet.has(task.id)) {
         row.taskIdSet.add(task.id);
         row.taskIds.push(task.id);
+        if (task.status === "completed" && task.completedAt) {
+          const completedMs = Date.parse(task.completedAt);
+          if (Number.isFinite(completedMs) && (row.lastCompletedMs === void 0 || completedMs > row.lastCompletedMs)) {
+            row.lastCompletedMs = completedMs;
+            row.lastCompletedAt = task.completedAt;
+          }
+        }
         if (unscheduled) {
           row.hasUnscheduledTasks = true;
           row.unscheduledCount += 1;
@@ -444,7 +451,7 @@ function aggregateTagProgress(input, month, options = {}) {
       rows.set(tagKey, row);
     }
   }
-  return [...rows.values()].filter((row) => row.total > 0 || row.unscheduledCount > 0).sort((a, b) => a.tagKey.localeCompare(b.tagKey)).map(({ taskIdSet: _taskIdSet, ...row }) => row);
+  return [...rows.values()].filter((row) => row.total > 0 || row.unscheduledCount > 0).sort((a, b) => a.tagKey.localeCompare(b.tagKey)).map(({ taskIdSet: _taskIdSet, lastCompletedMs: _lastCompletedMs, ...row }) => row);
 }
 
 // src/core/local-date.ts
@@ -1202,6 +1209,13 @@ var TickTickTagProgressSettingTab = class extends import_obsidian2.PluginSetting
 var import_obsidian3 = require("obsidian");
 
 // src/ui/dashboard-renderer.ts
+var STAGNATION_DAYS = 7;
+function daysSince(iso, now = Date.now()) {
+  if (!iso) return null;
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return null;
+  return Math.max(0, Math.floor((now - then) / 864e5));
+}
 function element(tag, className, text) {
   const el = document.createElement(tag);
   if (className) el.className = className;
@@ -1330,6 +1344,12 @@ function renderRows(root, model, actions) {
     }
     const progress = element("div", "ttgp-progress-cell");
     progress.append(element("strong", "ttgp-fraction", `${row.completed}/${row.total}`), element("span", "ttgp-percent", `${row.percent}%`));
+    if (row.total > 0) {
+      const days = daysSince(row.lastCompletedAt);
+      const stagnation = element("span", "ttgp-last-completed", days === null ? "\uC774\uBC88 \uB2EC \uC644\uB8CC \uC5C6\uC74C" : `\uB9C8\uC9C0\uB9C9 \uC644\uB8CC ${days}\uC77C \uC804`);
+      if (days !== null && days >= STAGNATION_DAYS) stagnation.classList.add("is-stale");
+      progress.append(stagnation);
+    }
     const timeline = element("div", "ttgp-timeline-cell");
     timeline.style.setProperty("--tt-days", String(dayCount));
     if (row.total === 0 || row.visibleStartDay === void 0 || row.visibleEndDay === void 0) {

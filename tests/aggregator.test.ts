@@ -41,6 +41,18 @@ describe('aggregateTagProgress', () => {
     });
   });
 
+  it('records the most recent completion time per tag', () => {
+    const early = { ...task('e', 'completed', ['A']), completedAt: '2026-07-03T09:00:00.000+0000' };
+    const late = { ...task('l', 'completed', ['A']), completedAt: '2026-07-11T09:00:00.000+0000' };
+    const [row] = aggregateTagProgress([early, late], '2026-07');
+    expect(row?.lastCompletedAt).toBe('2026-07-11T09:00:00.000+0000');
+  });
+
+  it('leaves lastCompletedAt undefined when nothing is completed', () => {
+    const [row] = aggregateTagProgress([task('o', 'open', ['A'])], '2026-07');
+    expect(row?.lastCompletedAt).toBeUndefined();
+  });
+
   it('excludes abandoned and unknown tasks', () => {
     expect(aggregateTagProgress([task('a', 'abandoned', ['A']), task('u', 'unknown', ['A'])], '2026-07')).toEqual([]);
   });
