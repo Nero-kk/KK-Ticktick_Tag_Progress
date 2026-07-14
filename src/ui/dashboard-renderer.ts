@@ -37,6 +37,24 @@ export interface DashboardActions {
 
 const STAGNATION_DAYS = 7;
 
+function todayLocalDate(): string {
+  return new Intl.DateTimeFormat('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+}
+
+// Sort drilldown tasks by due date ascending, unscheduled last, open before
+// completed on the same day, so the most pressing work surfaces at the top.
+function compareByDue(a: NormalizedTask, b: NormalizedTask): number {
+  const ad = a.localDueDate;
+  const bd = b.localDueDate;
+  if (ad !== bd) {
+    if (ad === undefined) return 1;
+    if (bd === undefined) return -1;
+    return ad < bd ? -1 : 1;
+  }
+  const rank = (task: NormalizedTask): number => (task.status === 'open' ? 0 : 1);
+  return rank(a) - rank(b);
+}
+
 function daysSince(iso: string | undefined, now: number = Date.now()): number | null {
   if (!iso) return null;
   const then = Date.parse(iso);
@@ -207,7 +225,8 @@ function renderDrilldown(root: HTMLElement, model: DashboardModel, actions: Dash
   const selectedRow = model.rows.find((row) => row.tagKey === model.selectedTagKey);
   if (!selectedRow) return;
   const taskIds = new Set(selectedRow.taskIds);
-  const tasks = model.tasks.filter((task) => taskIds.has(task.id));
+  const today = todayLocalDate();
+  const tasks = model.tasks.filter((task) => taskIds.has(task.id)).sort(compareByDue);
   const panel = element('section', 'ttgp-drilldown');
   const header = element('div', 'ttgp-drilldown-header');
   const title = element('div');
@@ -232,7 +251,15 @@ function renderDrilldown(root: HTMLElement, model: DashboardModel, actions: Dash
     detail.type = 'button';
     detail.setAttribute('aria-label', `${task.title} 노트 생성 또는 열기`);
     detail.title = '태스크 노트 생성 또는 열기';
-    detail.append(element('strong', undefined, task.title), element('span', undefined, task.localDueDate ?? '기간 미지정'));
+    const overdue = task.status === 'open' && task.localDueDate !== undefined && task.localDueDate < today;
+    const meta = element('span', 'ttgp-task-due');
+    if (overdue) {
+      meta.classList.add('is-overdue');
+      meta.append(element('span', 'ttgp-overdue-badge', '지연'), element('span', undefined, task.localDueDate!));
+    } else {
+      meta.textContent = task.localDueDate ?? '기간 미지정';
+    }
+    detail.append(element('strong', undefined, task.title), meta);
     detail.addEventListener('click', (event) => actions.onOpenTask(task.id, event.ctrlKey || event.metaKey));
     item.append(state, detail);
     list.append(item);

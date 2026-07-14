@@ -1210,6 +1210,20 @@ var import_obsidian3 = require("obsidian");
 
 // src/ui/dashboard-renderer.ts
 var STAGNATION_DAYS = 7;
+function todayLocalDate() {
+  return new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit" }).format(/* @__PURE__ */ new Date());
+}
+function compareByDue(a, b) {
+  const ad = a.localDueDate;
+  const bd = b.localDueDate;
+  if (ad !== bd) {
+    if (ad === void 0) return 1;
+    if (bd === void 0) return -1;
+    return ad < bd ? -1 : 1;
+  }
+  const rank = (task) => task.status === "open" ? 0 : 1;
+  return rank(a) - rank(b);
+}
 function daysSince(iso, now = Date.now()) {
   if (!iso) return null;
   const then = Date.parse(iso);
@@ -1375,7 +1389,8 @@ function renderDrilldown(root, model, actions) {
   const selectedRow = model.rows.find((row) => row.tagKey === model.selectedTagKey);
   if (!selectedRow) return;
   const taskIds = new Set(selectedRow.taskIds);
-  const tasks = model.tasks.filter((task) => taskIds.has(task.id));
+  const today = todayLocalDate();
+  const tasks = model.tasks.filter((task) => taskIds.has(task.id)).sort(compareByDue);
   const panel = element("section", "ttgp-drilldown");
   const header = element("div", "ttgp-drilldown-header");
   const title = element("div");
@@ -1400,7 +1415,15 @@ function renderDrilldown(root, model, actions) {
     detail.type = "button";
     detail.setAttribute("aria-label", `${task.title} \uB178\uD2B8 \uC0DD\uC131 \uB610\uB294 \uC5F4\uAE30`);
     detail.title = "\uD0DC\uC2A4\uD06C \uB178\uD2B8 \uC0DD\uC131 \uB610\uB294 \uC5F4\uAE30";
-    detail.append(element("strong", void 0, task.title), element("span", void 0, task.localDueDate ?? "\uAE30\uAC04 \uBBF8\uC9C0\uC815"));
+    const overdue = task.status === "open" && task.localDueDate !== void 0 && task.localDueDate < today;
+    const meta = element("span", "ttgp-task-due");
+    if (overdue) {
+      meta.classList.add("is-overdue");
+      meta.append(element("span", "ttgp-overdue-badge", "\uC9C0\uC5F0"), element("span", void 0, task.localDueDate));
+    } else {
+      meta.textContent = task.localDueDate ?? "\uAE30\uAC04 \uBBF8\uC9C0\uC815";
+    }
+    detail.append(element("strong", void 0, task.title), meta);
     detail.addEventListener("click", (event) => actions.onOpenTask(task.id, event.ctrlKey || event.metaKey));
     item.append(state, detail);
     list.append(item);

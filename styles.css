@@ -199,6 +199,21 @@
   color: var(--text-warning);
 }
 
+.ttgp-task-due.is-overdue {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-error);
+}
+
+.ttgp-overdue-badge {
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 0.72em;
+  color: var(--text-on-accent, #fff);
+  background: var(--text-error);
+}
+
 .ttgp-grid-header {
   min-height: 48px;
   border-bottom: 2px solid color-mix(in srgb, var(--ttgp-line) 65%, var(--ttgp-ink));

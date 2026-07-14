@@ -102,6 +102,24 @@ describe('renderDashboard', () => {
     expect(root.querySelector('.ttgp-hub-link')).toBeNull();
   });
 
+  it('sorts drilldown tasks by due date and flags overdue open tasks', () => {
+    const root = document.createElement('div');
+    const multi: DashboardModel = {
+      ...model,
+      rows: [{ ...model.rows[0]!, taskIds: ['later', 'overdue', 'none'] }],
+      tasks: [
+        { id: 'later', projectId: 'p', projectName: 'P', title: 'Later', tags: ['UNIOS8K'], status: 'open', isAllDay: true, localDueDate: '2999-01-01' },
+        { id: 'overdue', projectId: 'p', projectName: 'P', title: 'Overdue', tags: ['UNIOS8K'], status: 'open', isAllDay: true, localDueDate: '2000-01-01' },
+        { id: 'none', projectId: 'p', projectName: 'P', title: 'Undated', tags: ['UNIOS8K'], status: 'open', isAllDay: true },
+      ],
+    };
+    renderDashboard(root, multi, actions());
+    const titles = [...root.querySelectorAll('.ttgp-task-open strong')].map((el) => el.textContent);
+    expect(titles).toEqual(['Overdue', 'Later', 'Undated']);
+    const badges = [...root.querySelectorAll('.ttgp-overdue-badge')].map((el) => el.textContent);
+    expect(badges).toEqual(['지연']);
+  });
+
   it('renders completed task checkboxes as checked and disabled', () => {
     const root = document.createElement('div');
     const completed: DashboardModel = {
