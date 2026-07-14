@@ -26,6 +26,10 @@ renderDashboard(document.querySelector<HTMLElement>('#app')!, {
   lastSuccessAt: '2026-07-14T05:32:00Z',
   uniqueTaskCount: 265,
   selectedTagKey: 'unios8k',
+  summary: {
+    activeProjectCount: 6, taskTotal: 265, taskCompleted: 200, untaggedCount: 3,
+    unscheduledCount: 2, unknownStatusCount: 0, snapshotAgeMs: 5 * 3_600_000, stale: false,
+  },
   rows,
   tasks,
 }, {

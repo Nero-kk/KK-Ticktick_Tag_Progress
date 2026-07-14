@@ -1225,6 +1225,38 @@ function renderToolbar(root, model, actions) {
   toolbar.append(monthNav, meta, sync);
   root.append(toolbar);
 }
+function formatAge(ageMs) {
+  if (!Number.isFinite(ageMs) || ageMs < 0) return "\uC2DC\uAC01 \uBD88\uBA85";
+  const minutes = Math.floor(ageMs / 6e4);
+  if (minutes < 1) return "\uBC29\uAE08 \uC804";
+  if (minutes < 60) return `${minutes}\uBD84 \uC804`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}\uC2DC\uAC04 \uC804`;
+  return `${Math.floor(hours / 24)}\uC77C \uC804`;
+}
+function renderSummary(root, summary) {
+  const strip = element("section", "ttgp-summary");
+  strip.setAttribute("aria-label", "\uC6D4\uAC04 \uC694\uC57D");
+  const metric = (label, value, extraClass) => {
+    const item = element("span", `ttgp-summary-item${extraClass ? ` ${extraClass}` : ""}`);
+    item.append(element("strong", "ttgp-summary-value", value), element("span", "ttgp-summary-label", label));
+    return item;
+  };
+  strip.append(
+    metric("\uD65C\uC131 \uD504\uB85C\uC81D\uD2B8", String(summary.activeProjectCount)),
+    metric("\uD0DC\uC2A4\uD06C", `${summary.taskCompleted}/${summary.taskTotal}`),
+    metric("\uBBF8\uBD84\uB958", String(summary.untaggedCount), summary.untaggedCount > 0 ? "is-flagged" : void 0),
+    metric("\uAE30\uAC04 \uBBF8\uC9C0\uC815", String(summary.unscheduledCount), summary.unscheduledCount > 0 ? "is-flagged" : void 0)
+  );
+  if (summary.unknownStatusCount > 0) {
+    strip.append(metric("\uC0C1\uD0DC \uBBF8\uD655\uC815", String(summary.unknownStatusCount), "is-warning"));
+  }
+  const freshness = element("span", `ttgp-summary-freshness${summary.stale ? " is-stale" : ""}`);
+  freshness.append(element("span", "ttgp-summary-label", "\uB370\uC774\uD130"), element("strong", "ttgp-summary-value", formatAge(summary.snapshotAgeMs)));
+  if (summary.stale) freshness.append(element("span", "ttgp-summary-badge", "\uB3D9\uAE30\uD654 \uD544\uC694"));
+  strip.append(freshness);
+  root.append(strip);
+}
 function renderHeader(root, month) {
   const header = element("div", "ttgp-grid-header");
   const tag = element("div", "ttgp-heading ttgp-heading--tag", "\uD0DC\uADF8");
@@ -1328,6 +1360,7 @@ function renderDashboard(root, model, actions) {
   root.replaceChildren();
   root.classList.add("ttgp-dashboard");
   renderToolbar(root, model, actions);
+  if (model.summary) renderSummary(root, model.summary);
   if (model.status === "empty" && model.rows.length === 0) {
     root.append(element("div", "ttgp-empty", "\uC774 \uC6D4 \uB370\uC774\uD130\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4. \uB3D9\uAE30\uD654\uB97C \uC2E4\uD589\uD558\uC138\uC694."));
     return;
@@ -1624,12 +1657,25 @@ var TickTickTagProgressPlugin = class extends import_obsidian5.Plugin {
     });
     const failedAfterSnapshot = lastAttempt && lastAttempt.selectedMonth === month && lastAttempt.result !== "success" && lastAttempt.attemptedAt > snapshot.generatedAt;
     const status = this.syncing ? "syncing" : failedAfterSnapshot ? "stale" : snapshot.coverage.status === "partial" ? "partial" : "complete";
+    const considered = snapshot.tasks.filter((task) => task.status === "open" || task.status === "completed");
+    const ageMs = Date.now() - Date.parse(snapshot.generatedAt);
+    const summary = {
+      activeProjectCount: snapshot.coverage.projectIds.length,
+      taskTotal: considered.length,
+      taskCompleted: considered.filter((task) => task.status === "completed").length,
+      untaggedCount: considered.filter((task) => task.tags.length === 0).length,
+      unscheduledCount: considered.filter((task) => !task.localStartDate && !task.localDueDate).length,
+      unknownStatusCount: snapshot.coverage.unknownTaskCount,
+      snapshotAgeMs: ageMs,
+      stale: !Number.isFinite(ageMs) || ageMs > this.settings.completionTtlMinutes * 6e4
+    };
     return {
       month,
       status,
       lastSuccessAt: snapshot.generatedAt,
       uniqueTaskCount: new Set(scheduled.map((task) => task.id)).size,
       selectedTagKey,
+      summary,
       rows,
       tasks: snapshot.tasks
     };

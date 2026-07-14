@@ -143,12 +143,27 @@ export default class TickTickTagProgressPlugin extends Plugin {
       : failedAfterSnapshot ? 'stale'
       : snapshot.coverage.status === 'partial' ? 'partial'
       : 'complete';
+    // Summary counts come from the whole snapshot, before include/exclude filters,
+    // so hidden rows still surface as exception totals.
+    const considered = snapshot.tasks.filter((task) => task.status === 'open' || task.status === 'completed');
+    const ageMs = Date.now() - Date.parse(snapshot.generatedAt);
+    const summary = {
+      activeProjectCount: snapshot.coverage.projectIds.length,
+      taskTotal: considered.length,
+      taskCompleted: considered.filter((task) => task.status === 'completed').length,
+      untaggedCount: considered.filter((task) => task.tags.length === 0).length,
+      unscheduledCount: considered.filter((task) => !task.localStartDate && !task.localDueDate).length,
+      unknownStatusCount: snapshot.coverage.unknownTaskCount,
+      snapshotAgeMs: ageMs,
+      stale: !Number.isFinite(ageMs) || ageMs > this.settings.completionTtlMinutes * 60_000,
+    };
     return {
       month,
       status,
       lastSuccessAt: snapshot.generatedAt,
       uniqueTaskCount: new Set(scheduled.map((task) => task.id)).size,
       selectedTagKey,
+      summary,
       rows,
       tasks: snapshot.tasks,
     };

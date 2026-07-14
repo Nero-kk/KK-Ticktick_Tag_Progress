@@ -1,12 +1,24 @@
 import type { NormalizedTask, TagProgress } from '../api/contracts';
 import { daysInMonth } from '../core/period';
 
+export interface DashboardSummary {
+  activeProjectCount: number;
+  taskTotal: number;
+  taskCompleted: number;
+  untaggedCount: number;
+  unscheduledCount: number;
+  unknownStatusCount: number;
+  snapshotAgeMs: number;
+  stale: boolean;
+}
+
 export interface DashboardModel {
   month: string;
   status: 'empty' | 'syncing' | 'complete' | 'partial' | 'stale' | 'auth' | 'contract';
   lastSuccessAt?: string;
   uniqueTaskCount: number;
   selectedTagKey?: string;
+  summary?: DashboardSummary;
   rows: TagProgress[];
   tasks: NormalizedTask[];
 }
@@ -63,6 +75,40 @@ function renderToolbar(root: HTMLElement, model: DashboardModel, actions: Dashbo
   sync.addEventListener('click', actions.onSync);
   toolbar.append(monthNav, meta, sync);
   root.append(toolbar);
+}
+
+function formatAge(ageMs: number): string {
+  if (!Number.isFinite(ageMs) || ageMs < 0) return '시각 불명';
+  const minutes = Math.floor(ageMs / 60_000);
+  if (minutes < 1) return '방금 전';
+  if (minutes < 60) return `${minutes}분 전`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}시간 전`;
+  return `${Math.floor(hours / 24)}일 전`;
+}
+
+function renderSummary(root: HTMLElement, summary: DashboardSummary): void {
+  const strip = element('section', 'ttgp-summary');
+  strip.setAttribute('aria-label', '월간 요약');
+  const metric = (label: string, value: string, extraClass?: string): HTMLElement => {
+    const item = element('span', `ttgp-summary-item${extraClass ? ` ${extraClass}` : ''}`);
+    item.append(element('strong', 'ttgp-summary-value', value), element('span', 'ttgp-summary-label', label));
+    return item;
+  };
+  strip.append(
+    metric('활성 프로젝트', String(summary.activeProjectCount)),
+    metric('태스크', `${summary.taskCompleted}/${summary.taskTotal}`),
+    metric('미분류', String(summary.untaggedCount), summary.untaggedCount > 0 ? 'is-flagged' : undefined),
+    metric('기간 미지정', String(summary.unscheduledCount), summary.unscheduledCount > 0 ? 'is-flagged' : undefined),
+  );
+  if (summary.unknownStatusCount > 0) {
+    strip.append(metric('상태 미확정', String(summary.unknownStatusCount), 'is-warning'));
+  }
+  const freshness = element('span', `ttgp-summary-freshness${summary.stale ? ' is-stale' : ''}`);
+  freshness.append(element('span', 'ttgp-summary-label', '데이터'), element('strong', 'ttgp-summary-value', formatAge(summary.snapshotAgeMs)));
+  if (summary.stale) freshness.append(element('span', 'ttgp-summary-badge', '동기화 필요'));
+  strip.append(freshness);
+  root.append(strip);
 }
 
 function renderHeader(root: HTMLElement, month: string): void {
@@ -172,6 +218,7 @@ export function renderDashboard(root: HTMLElement, model: DashboardModel, action
   root.replaceChildren();
   root.classList.add('ttgp-dashboard');
   renderToolbar(root, model, actions);
+  if (model.summary) renderSummary(root, model.summary);
   if (model.status === 'empty' && model.rows.length === 0) {
     root.append(element('div', 'ttgp-empty', '이 월 데이터가 없습니다. 동기화를 실행하세요.'));
     return;
