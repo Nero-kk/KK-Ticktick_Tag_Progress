@@ -113,6 +113,15 @@ export class TickTickTagProgressSettingTab extends PluginSettingTab {
       }));
 
     new Setting(containerEl)
+      .setName('Project Hub 노트 타입')
+      .setDesc('태그 행의 “Hub” 링크가 찾을 노트의 frontmatter type 값입니다. project 필드가 프로젝트와 일치하는 노트를 엽니다. 기본 “project-hub”.')
+      .addText((text) => text.setValue(this.plugin.settings.hubNoteType).onChange(async (value) => {
+        this.plugin.settings.hubNoteType = value.trim() || this.plugin.settings.hubNoteType;
+        await this.plugin.savePluginData();
+        this.plugin.refreshViews();
+      }));
+
+    new Setting(containerEl)
       .setName('태스크 노트 하위 폴더')
       .setDesc('각 프로젝트 폴더 안에서 TickTick 노트를 모으는 하위 폴더명입니다. 기본 “TickTick Notes”.')
       .addText((text) => text.setValue(this.plugin.settings.taskNotesSubfolder).onChange(async (value) => {

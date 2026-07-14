@@ -7,6 +7,7 @@ export interface TickTickTagProgressSettings {
   projectsBasePath: string;
   projectsRootFolder: string;
   taskNotesSubfolder: string;
+  hubNoteType: string;
   completionTtlMinutes: number;
 }
 
@@ -19,6 +20,7 @@ export const DEFAULT_SETTINGS: TickTickTagProgressSettings = {
   projectsBasePath: '90. Settings/Bases/Projects.base',
   projectsRootFolder: '40. Projects',
   taskNotesSubfolder: 'TickTick Notes',
+  hubNoteType: 'project-hub',
   completionTtlMinutes: 30,
 };
 
@@ -75,6 +77,9 @@ export function loadSettings(raw: unknown): TickTickTagProgressSettings {
     taskNotesSubfolder: typeof value.taskNotesSubfolder === 'string' && value.taskNotesSubfolder.trim()
       ? value.taskNotesSubfolder.trim().replace(/^\/+|\/+$/g, '')
       : DEFAULT_SETTINGS.taskNotesSubfolder,
+    hubNoteType: typeof value.hubNoteType === 'string' && value.hubNoteType.trim()
+      ? value.hubNoteType.trim()
+      : DEFAULT_SETTINGS.hubNoteType,
     completionTtlMinutes: typeof value.completionTtlMinutes === 'number'
       && Number.isFinite(value.completionTtlMinutes) && value.completionTtlMinutes > 0
       ? value.completionTtlMinutes

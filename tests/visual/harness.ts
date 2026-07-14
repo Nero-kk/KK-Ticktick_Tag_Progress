@@ -39,4 +39,5 @@ renderDashboard(document.querySelector<HTMLElement>('#app')!, {
   onRequestComplete: () => undefined,
   onOpenTask: () => undefined,
   onOpenBases: () => undefined,
+  onOpenHub: () => undefined,
 });

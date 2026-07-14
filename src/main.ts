@@ -4,7 +4,9 @@ import {
   Plugin,
   requestUrl,
   TFile,
+  TFolder,
 } from 'obsidian';
+import { resolveCanonicalProject } from './notes/project-mapper';
 import type { ApiTransport } from './api/official-open-api-client';
 import { OfficialOpenApiClient } from './api/official-open-api-client';
 import { TickTickHttpError } from './api/errors';
@@ -110,6 +112,47 @@ export default class TickTickTagProgressPlugin extends Plugin {
     }
   }
 
+  private listProjectFolders(): string[] {
+    const root = this.app.vault.getFolderByPath(normalizePath(this.settings.projectsRootFolder));
+    if (!(root instanceof TFolder)) return [];
+    return root.children.filter((child): child is TFolder => child instanceof TFolder).map((folder) => folder.name);
+  }
+
+  // Canonical project folder -> its Project Hub note path, only when exactly one
+  // hub claims that project. Ambiguous or missing hubs are omitted (fail-closed).
+  private buildHubIndex(folders: string[]): Map<string, string> {
+    const byCanonical = new Map<string, string[]>();
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+      if (!frontmatter || frontmatter.type !== this.settings.hubNoteType || typeof frontmatter.project !== 'string') continue;
+      const canonical = resolveCanonicalProject(frontmatter.project, folders, this.settings.projectAliases);
+      if (!canonical) continue;
+      const paths = byCanonical.get(canonical) ?? [];
+      paths.push(file.path);
+      byCanonical.set(canonical, paths);
+    }
+    const index = new Map<string, string>();
+    for (const [canonical, paths] of byCanonical) if (paths.length === 1) index.set(canonical, paths[0]!);
+    return index;
+  }
+
+  private hubPathForTag(tagKey: string, folders: string[], index: Map<string, string>): string | null {
+    if (tagKey === UNTAGGED_KEY) return null;
+    const canonical = resolveCanonicalProject(tagKey, folders, this.settings.projectAliases);
+    return canonical ? index.get(canonical) ?? null : null;
+  }
+
+  async openProjectHub(tagKey: string): Promise<void> {
+    const folders = this.listProjectFolders();
+    const path = this.hubPathForTag(tagKey, folders, this.buildHubIndex(folders));
+    if (!path) {
+      new Notice('연결된 Project Hub를 찾지 못했습니다.');
+      return;
+    }
+    const file = this.app.vault.getFileByPath(normalizePath(path));
+    if (file instanceof TFile) await this.app.workspace.getLeaf('tab').openFile(file);
+  }
+
   getDashboardModel(month: string, selectedTagKey?: string): DashboardModel {
     const snapshot = this.snapshotStore.getLastGood(month);
     const lastAttempt = this.snapshotStore.getLastAttempt();
@@ -158,6 +201,13 @@ export default class TickTickTagProgressPlugin extends Plugin {
       snapshotAgeMs: ageMs,
       stale: !Number.isFinite(ageMs) || ageMs > this.settings.completionTtlMinutes * 60_000,
     };
+    const folders = this.listProjectFolders();
+    const hubIndex = this.buildHubIndex(folders);
+    const hubPathsByTag: Record<string, string> = {};
+    for (const row of rows) {
+      const path = this.hubPathForTag(row.tagKey, folders, hubIndex);
+      if (path) hubPathsByTag[row.tagKey] = path;
+    }
     return {
       month,
       status,
@@ -165,6 +215,7 @@ export default class TickTickTagProgressPlugin extends Plugin {
       uniqueTaskCount: new Set(scheduled.map((task) => task.id)).size,
       selectedTagKey,
       summary,
+      hubPathsByTag,
       rows,
       tasks: snapshot.tasks,
     };

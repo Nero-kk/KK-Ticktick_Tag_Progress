@@ -22,6 +22,7 @@ function actions(overrides: Partial<DashboardActions> = {}): DashboardActions {
     onRequestComplete: vi.fn(),
     onOpenTask: vi.fn(),
     onOpenBases: vi.fn(),
+    onOpenHub: vi.fn(),
     ...overrides,
   };
 }
@@ -81,6 +82,24 @@ describe('renderDashboard', () => {
 
     root.querySelector<HTMLButtonElement>('.ttgp-task-open')!.click();
     expect(onOpenTask).toHaveBeenCalledWith('t1', false);
+  });
+
+  it('shows a Hub link only for tags with a resolved hub and opens it without selecting the row', () => {
+    const onOpenHub = vi.fn();
+    const onSelectTag = vi.fn();
+    const root = document.createElement('div');
+    renderDashboard(root, { ...model, hubPathsByTag: { unios8k: '40. Projects/UNIOS8K/Hub.md' } }, actions({ onOpenHub, onSelectTag }));
+    const hub = root.querySelector<HTMLButtonElement>('.ttgp-hub-link')!;
+    expect(hub).not.toBeNull();
+    hub.click();
+    expect(onOpenHub).toHaveBeenCalledWith('unios8k');
+    expect(onSelectTag).not.toHaveBeenCalled();
+  });
+
+  it('omits the Hub link when no hub is resolved for the tag', () => {
+    const root = document.createElement('div');
+    renderDashboard(root, { ...model, hubPathsByTag: {} }, actions());
+    expect(root.querySelector('.ttgp-hub-link')).toBeNull();
   });
 
   it('renders completed task checkboxes as checked and disabled', () => {

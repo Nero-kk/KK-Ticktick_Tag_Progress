@@ -24,6 +24,43 @@ __export(main_exports, {
 module.exports = __toCommonJS(main_exports);
 var import_obsidian5 = require("obsidian");
 
+// src/notes/project-mapper.ts
+function key(value) {
+  return value.normalize("NFKC").trim().toUpperCase();
+}
+function equivalentKeys(value) {
+  const normalized = key(value);
+  const candidates = /* @__PURE__ */ new Set([normalized]);
+  const uni = /^UNI(.+)$/.exec(normalized);
+  if (uni?.[1]) {
+    candidates.add(`U${uni[1]}`);
+    candidates.add(uni[1]);
+  }
+  const shortU = /^U(.+)$/.exec(normalized);
+  if (shortU?.[1]) {
+    candidates.add(`UNI${shortU[1]}`);
+    candidates.add(shortU[1]);
+  }
+  if (!normalized.startsWith("U")) {
+    candidates.add(`U${normalized}`);
+    candidates.add(`UNI${normalized}`);
+  }
+  return candidates;
+}
+function resolveCanonicalProject(projectName, canonicalFolders, explicitAliases) {
+  const folders = new Map(canonicalFolders.map((folder) => [key(folder), folder]));
+  const direct = folders.get(key(projectName));
+  if (direct) return direct;
+  const aliasTarget = Object.entries(explicitAliases).find(([alias]) => key(alias) === key(projectName))?.[1];
+  if (aliasTarget) return folders.get(key(aliasTarget)) ?? null;
+  const inputKeys = equivalentKeys(projectName);
+  const matches = canonicalFolders.filter((folder) => {
+    const folderKeys = equivalentKeys(folder);
+    return [...inputKeys].some((candidate) => folderKeys.has(candidate));
+  });
+  return matches.length === 1 ? matches[0] ?? null : null;
+}
+
 // src/api/contract-validator.ts
 function record(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
@@ -972,43 +1009,6 @@ var ObsidianTaskNotePort = class {
   }
 };
 
-// src/notes/project-mapper.ts
-function key(value) {
-  return value.normalize("NFKC").trim().toUpperCase();
-}
-function equivalentKeys(value) {
-  const normalized = key(value);
-  const candidates = /* @__PURE__ */ new Set([normalized]);
-  const uni = /^UNI(.+)$/.exec(normalized);
-  if (uni?.[1]) {
-    candidates.add(`U${uni[1]}`);
-    candidates.add(uni[1]);
-  }
-  const shortU = /^U(.+)$/.exec(normalized);
-  if (shortU?.[1]) {
-    candidates.add(`UNI${shortU[1]}`);
-    candidates.add(shortU[1]);
-  }
-  if (!normalized.startsWith("U")) {
-    candidates.add(`U${normalized}`);
-    candidates.add(`UNI${normalized}`);
-  }
-  return candidates;
-}
-function resolveCanonicalProject(projectName, canonicalFolders, explicitAliases) {
-  const folders = new Map(canonicalFolders.map((folder) => [key(folder), folder]));
-  const direct = folders.get(key(projectName));
-  if (direct) return direct;
-  const aliasTarget = Object.entries(explicitAliases).find(([alias]) => key(alias) === key(projectName))?.[1];
-  if (aliasTarget) return folders.get(key(aliasTarget)) ?? null;
-  const inputKeys = equivalentKeys(projectName);
-  const matches = canonicalFolders.filter((folder) => {
-    const folderKeys = equivalentKeys(folder);
-    return [...inputKeys].some((candidate) => folderKeys.has(candidate));
-  });
-  return matches.length === 1 ? matches[0] ?? null : null;
-}
-
 // src/notes/task-note-repository.ts
 function resolveTaskProject(task, folders, aliases2) {
   const direct = resolveCanonicalProject(task.projectName, folders, aliases2);
@@ -1078,6 +1078,7 @@ var DEFAULT_SETTINGS = {
   projectsBasePath: "90. Settings/Bases/Projects.base",
   projectsRootFolder: "40. Projects",
   taskNotesSubfolder: "TickTick Notes",
+  hubNoteType: "project-hub",
   completionTtlMinutes: 30
 };
 function validSecretId(value) {
@@ -1111,6 +1112,7 @@ function loadSettings(raw) {
     projectsBasePath: typeof value.projectsBasePath === "string" && value.projectsBasePath.trim() ? value.projectsBasePath.trim() : DEFAULT_SETTINGS.projectsBasePath,
     projectsRootFolder: typeof value.projectsRootFolder === "string" && value.projectsRootFolder.trim() ? value.projectsRootFolder.trim().replace(/\/+$/, "") : DEFAULT_SETTINGS.projectsRootFolder,
     taskNotesSubfolder: typeof value.taskNotesSubfolder === "string" && value.taskNotesSubfolder.trim() ? value.taskNotesSubfolder.trim().replace(/^\/+|\/+$/g, "") : DEFAULT_SETTINGS.taskNotesSubfolder,
+    hubNoteType: typeof value.hubNoteType === "string" && value.hubNoteType.trim() ? value.hubNoteType.trim() : DEFAULT_SETTINGS.hubNoteType,
     completionTtlMinutes: typeof value.completionTtlMinutes === "number" && Number.isFinite(value.completionTtlMinutes) && value.completionTtlMinutes > 0 ? value.completionTtlMinutes : DEFAULT_SETTINGS.completionTtlMinutes
   };
 }
@@ -1182,6 +1184,11 @@ var TickTickTagProgressSettingTab = class extends import_obsidian2.PluginSetting
     new import_obsidian2.Setting(containerEl).setName("\uD504\uB85C\uC81D\uD2B8 \uB8E8\uD2B8 \uD3F4\uB354").setDesc("\uD0DC\uC2A4\uD06C \uB178\uD2B8\uB97C \uB9CC\uB4E4 \uB54C \uD504\uB85C\uC81D\uD2B8 \uD3F4\uB354\uB97C \uCC3E\uB294 \uC0C1\uC704 \uD3F4\uB354\uC785\uB2C8\uB2E4. \uAE30\uBCF8 \u201C40. Projects\u201D.").addText((text) => text.setValue(this.plugin.settings.projectsRootFolder).onChange(async (value) => {
       this.plugin.settings.projectsRootFolder = value.trim().replace(/\/+$/, "") || this.plugin.settings.projectsRootFolder;
       await this.plugin.savePluginData();
+    }));
+    new import_obsidian2.Setting(containerEl).setName("Project Hub \uB178\uD2B8 \uD0C0\uC785").setDesc("\uD0DC\uADF8 \uD589\uC758 \u201CHub\u201D \uB9C1\uD06C\uAC00 \uCC3E\uC744 \uB178\uD2B8\uC758 frontmatter type \uAC12\uC785\uB2C8\uB2E4. project \uD544\uB4DC\uAC00 \uD504\uB85C\uC81D\uD2B8\uC640 \uC77C\uCE58\uD558\uB294 \uB178\uD2B8\uB97C \uC5FD\uB2C8\uB2E4. \uAE30\uBCF8 \u201Cproject-hub\u201D.").addText((text) => text.setValue(this.plugin.settings.hubNoteType).onChange(async (value) => {
+      this.plugin.settings.hubNoteType = value.trim() || this.plugin.settings.hubNoteType;
+      await this.plugin.savePluginData();
+      this.plugin.refreshViews();
     }));
     new import_obsidian2.Setting(containerEl).setName("\uD0DC\uC2A4\uD06C \uB178\uD2B8 \uD558\uC704 \uD3F4\uB354").setDesc("\uAC01 \uD504\uB85C\uC81D\uD2B8 \uD3F4\uB354 \uC548\uC5D0\uC11C TickTick \uB178\uD2B8\uB97C \uBAA8\uC73C\uB294 \uD558\uC704 \uD3F4\uB354\uBA85\uC785\uB2C8\uB2E4. \uAE30\uBCF8 \u201CTickTick Notes\u201D.").addText((text) => text.setValue(this.plugin.settings.taskNotesSubfolder).onChange(async (value) => {
       this.plugin.settings.taskNotesSubfolder = value.trim().replace(/^\/+|\/+$/g, "") || this.plugin.settings.taskNotesSubfolder;
@@ -1311,6 +1318,16 @@ function renderRows(root, model, actions) {
     const tag = element("div", "ttgp-tag-cell");
     tag.append(element("span", "ttgp-tag-mark"), element("strong", "ttgp-tag-name", row.displayName));
     if (row.unscheduledCount > 0) tag.append(element("span", "ttgp-unscheduled", `+${row.unscheduledCount} \uAE30\uAC04 \uBBF8\uC9C0\uC815`));
+    const hubPath = model.hubPathsByTag?.[row.tagKey];
+    if (hubPath) {
+      const hub = button("Hub", `${row.displayName} Project Hub \uC5F4\uAE30`);
+      hub.classList.add("ttgp-hub-link");
+      hub.addEventListener("click", (event) => {
+        event.stopPropagation();
+        actions.onOpenHub(row.tagKey);
+      });
+      tag.append(hub);
+    }
     const progress = element("div", "ttgp-progress-cell");
     progress.append(element("strong", "ttgp-fraction", `${row.completed}/${row.total}`), element("span", "ttgp-percent", `${row.percent}%`));
     const timeline = element("div", "ttgp-timeline-cell");
@@ -1440,6 +1457,9 @@ var GanttDashboardView = class extends import_obsidian3.ItemView {
       },
       onOpenBases: (tagKey) => {
         void this.plugin.openProjectsBase(tagKey);
+      },
+      onOpenHub: (tagKey) => {
+        void this.plugin.openProjectHub(tagKey);
       }
     });
   }
@@ -1648,6 +1668,43 @@ var TickTickTagProgressPlugin = class extends import_obsidian5.Plugin {
       if (leaf.view instanceof GanttDashboardView) leaf.view.render();
     }
   }
+  listProjectFolders() {
+    const root = this.app.vault.getFolderByPath((0, import_obsidian5.normalizePath)(this.settings.projectsRootFolder));
+    if (!(root instanceof import_obsidian5.TFolder)) return [];
+    return root.children.filter((child) => child instanceof import_obsidian5.TFolder).map((folder) => folder.name);
+  }
+  // Canonical project folder -> its Project Hub note path, only when exactly one
+  // hub claims that project. Ambiguous or missing hubs are omitted (fail-closed).
+  buildHubIndex(folders) {
+    const byCanonical = /* @__PURE__ */ new Map();
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+      if (!frontmatter || frontmatter.type !== this.settings.hubNoteType || typeof frontmatter.project !== "string") continue;
+      const canonical = resolveCanonicalProject(frontmatter.project, folders, this.settings.projectAliases);
+      if (!canonical) continue;
+      const paths = byCanonical.get(canonical) ?? [];
+      paths.push(file.path);
+      byCanonical.set(canonical, paths);
+    }
+    const index = /* @__PURE__ */ new Map();
+    for (const [canonical, paths] of byCanonical) if (paths.length === 1) index.set(canonical, paths[0]);
+    return index;
+  }
+  hubPathForTag(tagKey, folders, index) {
+    if (tagKey === UNTAGGED_KEY) return null;
+    const canonical = resolveCanonicalProject(tagKey, folders, this.settings.projectAliases);
+    return canonical ? index.get(canonical) ?? null : null;
+  }
+  async openProjectHub(tagKey) {
+    const folders = this.listProjectFolders();
+    const path = this.hubPathForTag(tagKey, folders, this.buildHubIndex(folders));
+    if (!path) {
+      new import_obsidian5.Notice("\uC5F0\uACB0\uB41C Project Hub\uB97C \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
+      return;
+    }
+    const file = this.app.vault.getFileByPath((0, import_obsidian5.normalizePath)(path));
+    if (file instanceof import_obsidian5.TFile) await this.app.workspace.getLeaf("tab").openFile(file);
+  }
   getDashboardModel(month, selectedTagKey) {
     const snapshot = this.snapshotStore.getLastGood(month);
     const lastAttempt = this.snapshotStore.getLastAttempt();
@@ -1685,6 +1742,13 @@ var TickTickTagProgressPlugin = class extends import_obsidian5.Plugin {
       snapshotAgeMs: ageMs,
       stale: !Number.isFinite(ageMs) || ageMs > this.settings.completionTtlMinutes * 6e4
     };
+    const folders = this.listProjectFolders();
+    const hubIndex = this.buildHubIndex(folders);
+    const hubPathsByTag = {};
+    for (const row of rows) {
+      const path = this.hubPathForTag(row.tagKey, folders, hubIndex);
+      if (path) hubPathsByTag[row.tagKey] = path;
+    }
     return {
       month,
       status,
@@ -1692,6 +1756,7 @@ var TickTickTagProgressPlugin = class extends import_obsidian5.Plugin {
       uniqueTaskCount: new Set(scheduled.map((task) => task.id)).size,
       selectedTagKey,
       summary,
+      hubPathsByTag,
       rows,
       tasks: snapshot.tasks
     };

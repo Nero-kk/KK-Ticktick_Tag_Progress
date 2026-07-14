@@ -20,6 +20,7 @@ export interface DashboardModel {
   uniqueTaskCount: number;
   selectedTagKey?: string;
   summary?: DashboardSummary;
+  hubPathsByTag?: Record<string, string>;
   rows: TagProgress[];
   tasks: NormalizedTask[];
 }
@@ -31,6 +32,7 @@ export interface DashboardActions {
   onRequestComplete(taskId: string): void;
   onOpenTask(taskId: string, newPane: boolean): void;
   onOpenBases(tagKey?: string): void;
+  onOpenHub(tagKey: string): void;
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string): HTMLElementTagNameMap[K] {
@@ -155,6 +157,13 @@ function renderRows(root: HTMLElement, model: DashboardModel, actions: Dashboard
     const tag = element('div', 'ttgp-tag-cell');
     tag.append(element('span', 'ttgp-tag-mark'), element('strong', 'ttgp-tag-name', row.displayName));
     if (row.unscheduledCount > 0) tag.append(element('span', 'ttgp-unscheduled', `+${row.unscheduledCount} 기간 미지정`));
+    const hubPath = model.hubPathsByTag?.[row.tagKey];
+    if (hubPath) {
+      const hub = button('Hub', `${row.displayName} Project Hub 열기`);
+      hub.classList.add('ttgp-hub-link');
+      hub.addEventListener('click', (event) => { event.stopPropagation(); actions.onOpenHub(row.tagKey); });
+      tag.append(hub);
+    }
     const progress = element('div', 'ttgp-progress-cell');
     progress.append(element('strong', 'ttgp-fraction', `${row.completed}/${row.total}`), element('span', 'ttgp-percent', `${row.percent}%`));
     const timeline = element('div', 'ttgp-timeline-cell');

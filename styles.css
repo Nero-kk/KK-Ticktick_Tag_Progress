@@ -175,6 +175,21 @@
   border-top: 2px solid color-mix(in srgb, var(--ttgp-line) 70%, var(--ttgp-ink));
 }
 
+.ttgp-hub-link {
+  margin-left: 6px;
+  padding: 0 6px;
+  font-size: 0.7em;
+  line-height: 1.6;
+  border: 1px solid var(--ttgp-line);
+  border-radius: 4px;
+  color: var(--ttgp-muted);
+}
+
+.ttgp-hub-link:hover {
+  color: var(--interactive-accent);
+  border-color: var(--interactive-accent);
+}
+
 .ttgp-grid-header {
   min-height: 48px;
   border-bottom: 2px solid color-mix(in srgb, var(--ttgp-line) 65%, var(--ttgp-ink));
