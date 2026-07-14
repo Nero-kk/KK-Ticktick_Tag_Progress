@@ -17,7 +17,7 @@ export class TickTickTagProgressSettingTab extends PluginSettingTab {
     containerEl.createEl('h2', { text: 'TickTick 태그 진행률' });
     containerEl.createEl('p', {
       cls: 'setting-item-description',
-      text: '공식 Open API v1을 읽기 전용으로 사용합니다. 토큰 값은 SecretStorage에만 보관됩니다.',
+      text: '공식 Open API v1을 조회 + 사용자 확인형 완료 쓰기(태스크 완료 1종)로 사용합니다. 토큰 값은 SecretStorage에만 보관됩니다.',
     });
 
     const hasToken = Boolean(this.app.secretStorage.getSecret(this.plugin.settings.secretName));
@@ -58,8 +58,8 @@ export class TickTickTagProgressSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('포함 태그')
-      .setDesc('쉼표로 구분합니다. 비워 두면 모든 태그를 표시합니다.')
-      .addText((text) => text.setPlaceholder('UNIOS8K, UNI610H').setValue(this.plugin.settings.includeTags.join(', ')).onChange(async (value) => {
+      .setDesc('쉼표로 구분합니다. 입력한 순서가 대시보드 표시 순서가 됩니다. 비워 두면 모든 태그를 표시합니다. TickTick 실제 태그 표기(소문자)를 씁니다.')
+      .addText((text) => text.setPlaceholder('uos8k, u610h').setValue(this.plugin.settings.includeTags.join(', ')).onChange(async (value) => {
         this.plugin.settings.includeTags = csv(value);
         await this.plugin.savePluginData();
         this.plugin.refreshViews();
@@ -101,6 +101,22 @@ export class TickTickTagProgressSettingTab extends PluginSettingTab {
       .setDesc('생성된 로컬 노트를 여는 기존 Base입니다. 새 Base는 만들지 않습니다.')
       .addText((text) => text.setValue(this.plugin.settings.projectsBasePath).onChange(async (value) => {
         this.plugin.settings.projectsBasePath = value.trim();
+        await this.plugin.savePluginData();
+      }));
+
+    new Setting(containerEl)
+      .setName('프로젝트 루트 폴더')
+      .setDesc('태스크 노트를 만들 때 프로젝트 폴더를 찾는 상위 폴더입니다. 기본 “40. Projects”.')
+      .addText((text) => text.setValue(this.plugin.settings.projectsRootFolder).onChange(async (value) => {
+        this.plugin.settings.projectsRootFolder = value.trim().replace(/\/+$/, '') || this.plugin.settings.projectsRootFolder;
+        await this.plugin.savePluginData();
+      }));
+
+    new Setting(containerEl)
+      .setName('태스크 노트 하위 폴더')
+      .setDesc('각 프로젝트 폴더 안에서 TickTick 노트를 모으는 하위 폴더명입니다. 기본 “TickTick Notes”.')
+      .addText((text) => text.setValue(this.plugin.settings.taskNotesSubfolder).onChange(async (value) => {
+        this.plugin.settings.taskNotesSubfolder = value.trim().replace(/^\/+|\/+$/g, '') || this.plugin.settings.taskNotesSubfolder;
         await this.plugin.savePluginData();
       }));
 

@@ -37,12 +37,20 @@ export interface TaskNotePort {
   open(path: string, newPane: boolean): Promise<void>;
 }
 
+export interface TaskNoteLayout {
+  rootFolder: string;
+  taskNotesSubfolder: string;
+}
+
+const DEFAULT_LAYOUT: TaskNoteLayout = { rootFolder: '40. Projects', taskNotesSubfolder: 'TickTick Notes' };
+
 export class TaskNoteRepository {
   private readonly inFlight = new Map<string, Promise<string>>();
 
   constructor(
     private readonly port: TaskNotePort,
     private readonly projectAliases: Record<string, string>,
+    private readonly layout: TaskNoteLayout = DEFAULT_LAYOUT,
   ) {}
 
   async openOrCreate(
@@ -79,7 +87,7 @@ export class TaskNoteRepository {
     if (!canonicalProject) {
       throw new Error(`Project mapping not found: ${task.projectName}; tags: ${task.tags.join(', ') || '(none)'}`);
     }
-    const folder = `40. Projects/${canonicalProject}/TickTick Notes`;
+    const folder = `${this.layout.rootFolder}/${canonicalProject}/${this.layout.taskNotesSubfolder}`;
     await this.port.ensureFolder(folder);
     const path = `${folder}/${taskNoteFileName(task)}`;
     try {

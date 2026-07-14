@@ -50,7 +50,10 @@ function renderToolbar(root: HTMLElement, model: DashboardModel, actions: Dashbo
   monthNav.append(prev, month, next);
 
   const meta = element('div', 'ttgp-toolbar-meta');
-  const status = element('span', `ttgp-status ttgp-status--${model.status}`, model.status === 'complete' ? '전체 조회' : model.status);
+  const statusLabels: Partial<Record<DashboardModel['status'], string>> = {
+    complete: '전체 조회', partial: '부분 조회', stale: '오래됨', syncing: '동기화 중', empty: '데이터 없음',
+  };
+  const status = element('span', `ttgp-status ttgp-status--${model.status}`, statusLabels[model.status] ?? model.status);
   const count = element('span', 'ttgp-count', `일정 태스크 ${model.uniqueTaskCount}`);
   const synced = element('span', 'ttgp-last-sync', model.lastSuccessAt ? `마지막 성공 ${new Date(model.lastSuccessAt).toLocaleString('ko-KR')}` : '동기화 기록 없음');
   meta.append(status, count, synced);
@@ -66,7 +69,7 @@ function renderHeader(root: HTMLElement, month: string): void {
   const header = element('div', 'ttgp-grid-header');
   const tag = element('div', 'ttgp-heading ttgp-heading--tag', '태그');
   tag.dataset.column = 'tag';
-  const progress = element('div', 'ttgp-heading ttgp-heading--progress', '진행률');
+  const progress = element('div', 'ttgp-heading ttgp-heading--progress', '태스크 완료율');
   progress.dataset.column = 'progress';
   const timeline = element('div', 'ttgp-timeline-header');
   timeline.dataset.column = 'timeline';

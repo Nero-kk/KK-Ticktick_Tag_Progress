@@ -518,7 +518,7 @@ function sanitizeTask(value) {
 }
 function sanitizeCoverage(value, selectedMonth) {
   const item = record2(value);
-  if (!item || item.status !== "complete" || item.selectedMonth !== selectedMonth) return null;
+  if (!item || item.status !== "complete" && item.status !== "partial" || item.selectedMonth !== selectedMonth) return null;
   const projectIds = stringArray(item.projectIds);
   const successfulCalls = stringArray(item.successfulCalls);
   if (!projectIds || !successfulCalls || !Array.isArray(item.failedCalls) || typeof item.openTaskCount !== "number" || !Number.isFinite(item.openTaskCount) || typeof item.completedTaskCount !== "number" || !Number.isFinite(item.completedTaskCount)) return null;
@@ -528,14 +528,16 @@ function sanitizeCoverage(value, selectedMonth) {
     if (!entry || !nonEmptyString2(entry.call) || typeof entry.reason !== "string") return null;
     failedCalls.push({ call: entry.call, reason: entry.reason });
   }
+  const unknownTaskCount = typeof item.unknownTaskCount === "number" && Number.isFinite(item.unknownTaskCount) ? item.unknownTaskCount : 0;
   return {
-    status: "complete",
+    status: item.status,
     selectedMonth,
     projectIds,
     successfulCalls,
     failedCalls,
     openTaskCount: item.openTaskCount,
-    completedTaskCount: item.completedTaskCount
+    completedTaskCount: item.completedTaskCount,
+    unknownTaskCount
   };
 }
 function sanitizeSnapshot(value) {
@@ -588,7 +590,9 @@ var SnapshotStore = class {
   }
   accept(snapshot) {
     const sanitized = sanitizeSnapshot(snapshot);
-    if (!sanitized || sanitized.coverage.status !== "complete") throw new Error("Only valid complete snapshots can replace last-good");
+    if (!sanitized || sanitized.coverage.status !== "complete" && sanitized.coverage.status !== "partial") {
+      throw new Error("Only valid complete or partial snapshots can replace last-good");
+    }
     this.state.snapshots[sanitized.selectedMonth] = sanitized;
     this.state.lastAttempt = { selectedMonth: sanitized.selectedMonth, attemptedAt: sanitized.generatedAt, result: "success" };
   }
@@ -611,6 +615,10 @@ var SnapshotStore = class {
 };
 
 // src/core/sync-service.ts
+function failureReason(error) {
+  if (error instanceof TickTickHttpError) return error.kind;
+  return error instanceof Error ? error.message : "unknown";
+}
 var SyncService = class {
   constructor(api, store) {
     this.api = api;
@@ -631,11 +639,27 @@ var SyncService = class {
       const projects = await this.api.getProjects();
       const projectIds = projects.filter((project) => !project.closed).map((project) => project.id);
       const queryRange = getQueryRange(selectedMonth);
-      const [projectData, filtered, completed] = await Promise.all([
-        Promise.all(projectIds.map((id) => this.api.getProjectData(id))),
+      const successfulCalls = ["project"];
+      const failedCalls = [];
+      const projectData = await Promise.all(projectIds.map(async (id) => {
+        try {
+          const data = await this.api.getProjectData(id);
+          successfulCalls.push(`project/${id}/data`);
+          return data;
+        } catch (error) {
+          failedCalls.push({ call: `project/${id}/data`, reason: failureReason(error) });
+          return null;
+        }
+      }));
+      const [filteredResult, completedResult] = await Promise.allSettled([
         this.api.filterTasks({ projectIds, ...queryRange, status: [0, 2] }),
         this.api.getCompletedTasks({ projectIds, ...queryRange })
       ]);
+      const filtered = this.unwrap(filteredResult, "task/filter", successfulCalls, failedCalls);
+      const completed = this.unwrap(completedResult, "task/completed", successfulCalls, failedCalls);
+      if (successfulCalls.length === 1 && failedCalls.length > 0) {
+        throw new TickTickHttpError(0, "network", "TickTick sync produced no usable data");
+      }
       const projectNames = new Map(projects.map((project) => [project.id, project.name]));
       const fallbackTimeZone = systemTimeZone();
       const inScope = (raw) => {
@@ -648,9 +672,30 @@ var SyncService = class {
         return Boolean(localStart && localDue && clampTaskToMonth(localStart, localDue, selectedMonth));
       };
       const rawById = /* @__PURE__ */ new Map();
-      const allRaw = [...filtered, ...completed, ...projectData.flatMap((data) => data.tasks)];
+      const statusById = /* @__PURE__ */ new Map();
+      const allRaw = [
+        ...filtered,
+        ...completed,
+        ...projectData.flatMap((data) => data?.tasks ?? [])
+      ];
       for (const raw of allRaw) {
-        if (raw?.id && !rawById.has(raw.id) && inScope(raw)) rawById.set(raw.id, raw);
+        if (!raw?.id || !inScope(raw)) continue;
+        const seen = statusById.get(raw.id) ?? /* @__PURE__ */ new Set();
+        seen.add(raw.status);
+        statusById.set(raw.id, seen);
+        if (!rawById.has(raw.id)) rawById.set(raw.id, raw);
+      }
+      for (const [id, statuses] of statusById) {
+        if (statuses.size <= 1) continue;
+        const raw = rawById.get(id);
+        try {
+          const exact = await this.api.getTask(raw.projectId, id);
+          rawById.set(id, exact);
+          successfulCalls.push(`project/${raw.projectId}/task/${id}`);
+        } catch (error) {
+          rawById.set(id, { ...raw, status: 9 });
+          failedCalls.push({ call: `project/${raw.projectId}/task/${id}`, reason: failureReason(error) });
+        }
       }
       const tasks = [...rawById.values()].map((raw) => {
         const normalized = normalizeTask(raw, projectNames.get(raw.projectId) ?? raw.projectId, fallbackTimeZone);
@@ -663,13 +708,14 @@ var SyncService = class {
         selectedMonth,
         generatedAt,
         coverage: {
-          status: "complete",
+          status: failedCalls.length === 0 ? "complete" : "partial",
           selectedMonth,
           projectIds,
-          successfulCalls: ["project", ...projectIds.map((id) => `project/${id}/data`), "task/filter", "task/completed"],
-          failedCalls: [],
+          successfulCalls,
+          failedCalls,
           openTaskCount: tasks.filter((task) => task.status === "open").length,
-          completedTaskCount: tasks.filter((task) => task.status === "completed").length
+          completedTaskCount: tasks.filter((task) => task.status === "completed").length,
+          unknownTaskCount: tasks.filter((task) => task.status === "unknown").length
         },
         tasks
       };
@@ -681,6 +727,14 @@ var SyncService = class {
       this.store.recordFailure(selectedMonth, result, error instanceof Error ? error.message : "unknown");
       throw error;
     }
+  }
+  unwrap(result, call, successfulCalls, failedCalls) {
+    if (result.status === "fulfilled") {
+      successfulCalls.push(call);
+      return result.value;
+    }
+    failedCalls.push({ call, reason: failureReason(result.reason) });
+    return [];
   }
 };
 
@@ -847,12 +901,15 @@ function updateManagedFrontmatter(frontmatter, task, meta) {
 
 // src/notes/obsidian-task-note-port.ts
 var ObsidianTaskNotePort = class {
-  constructor(app) {
+  constructor(app, rootFolder = "40. Projects", taskNotesSubfolder = "TickTick Notes") {
     this.app = app;
+    this.rootFolder = rootFolder;
+    this.taskNotesSubfolder = taskNotesSubfolder;
   }
   async listTaskNotes() {
     const notes = [];
-    const candidates = this.app.vault.getMarkdownFiles().filter((file) => file.path.includes("/TickTick Notes/"));
+    const marker = `/${this.taskNotesSubfolder}/`;
+    const candidates = this.app.vault.getMarkdownFiles().filter((file) => file.path.includes(marker));
     for (const file of candidates) {
       const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
       if (frontmatter?.type === "ticktick-task-note" && typeof frontmatter.ticktickId === "string") {
@@ -872,7 +929,7 @@ var ObsidianTaskNotePort = class {
     return notes;
   }
   async listProjectFolders() {
-    const projects = this.app.vault.getFolderByPath("40. Projects");
+    const projects = this.app.vault.getFolderByPath(this.rootFolder);
     if (!projects) return [];
     return projects.children.filter((child) => child instanceof import_obsidian.TFolder).map((folder) => folder.name);
   }
@@ -922,11 +979,6 @@ function equivalentKeys(value) {
     candidates.add(`U${normalized}`);
     candidates.add(`UNI${normalized}`);
   }
-  if (normalized === "UNIOS8K" || normalized === "UOS8K" || normalized === "OS8K") {
-    candidates.add("UNIOS8K");
-    candidates.add("UOS8K");
-    candidates.add("OS8K");
-  }
   return candidates;
 }
 function resolveCanonicalProject(projectName, canonicalFolders, explicitAliases) {
@@ -953,10 +1005,12 @@ function resolveTaskProject(task, folders, aliases2) {
   }
   return tagMatches.values().next().value ?? null;
 }
+var DEFAULT_LAYOUT = { rootFolder: "40. Projects", taskNotesSubfolder: "TickTick Notes" };
 var TaskNoteRepository = class {
-  constructor(port, projectAliases) {
+  constructor(port, projectAliases, layout = DEFAULT_LAYOUT) {
     this.port = port;
     this.projectAliases = projectAliases;
+    this.layout = layout;
   }
   inFlight = /* @__PURE__ */ new Map();
   async openOrCreate(task, meta, newPane) {
@@ -985,7 +1039,7 @@ var TaskNoteRepository = class {
     if (!canonicalProject) {
       throw new Error(`Project mapping not found: ${task.projectName}; tags: ${task.tags.join(", ") || "(none)"}`);
     }
-    const folder = `40. Projects/${canonicalProject}/TickTick Notes`;
+    const folder = `${this.layout.rootFolder}/${canonicalProject}/${this.layout.taskNotesSubfolder}`;
     await this.port.ensureFolder(folder);
     const path = `${folder}/${taskNoteFileName(task)}`;
     try {
@@ -1008,6 +1062,8 @@ var DEFAULT_SETTINGS = {
   showUntagged: true,
   projectAliases: {},
   projectsBasePath: "90. Settings/Bases/Projects.base",
+  projectsRootFolder: "40. Projects",
+  taskNotesSubfolder: "TickTick Notes",
   completionTtlMinutes: 30
 };
 function validSecretId(value) {
@@ -1039,6 +1095,8 @@ function loadSettings(raw) {
     showUntagged: Object.prototype.hasOwnProperty.call(value, "showUntagged") ? value.showUntagged === true : DEFAULT_SETTINGS.showUntagged,
     projectAliases: aliases(value.projectAliases),
     projectsBasePath: typeof value.projectsBasePath === "string" && value.projectsBasePath.trim() ? value.projectsBasePath.trim() : DEFAULT_SETTINGS.projectsBasePath,
+    projectsRootFolder: typeof value.projectsRootFolder === "string" && value.projectsRootFolder.trim() ? value.projectsRootFolder.trim().replace(/\/+$/, "") : DEFAULT_SETTINGS.projectsRootFolder,
+    taskNotesSubfolder: typeof value.taskNotesSubfolder === "string" && value.taskNotesSubfolder.trim() ? value.taskNotesSubfolder.trim().replace(/^\/+|\/+$/g, "") : DEFAULT_SETTINGS.taskNotesSubfolder,
     completionTtlMinutes: typeof value.completionTtlMinutes === "number" && Number.isFinite(value.completionTtlMinutes) && value.completionTtlMinutes > 0 ? value.completionTtlMinutes : DEFAULT_SETTINGS.completionTtlMinutes
   };
 }
@@ -1059,7 +1117,7 @@ var TickTickTagProgressSettingTab = class extends import_obsidian2.PluginSetting
     containerEl.createEl("h2", { text: "TickTick \uD0DC\uADF8 \uC9C4\uD589\uB960" });
     containerEl.createEl("p", {
       cls: "setting-item-description",
-      text: "\uACF5\uC2DD Open API v1\uC744 \uC77D\uAE30 \uC804\uC6A9\uC73C\uB85C \uC0AC\uC6A9\uD569\uB2C8\uB2E4. \uD1A0\uD070 \uAC12\uC740 SecretStorage\uC5D0\uB9CC \uBCF4\uAD00\uB429\uB2C8\uB2E4."
+      text: "\uACF5\uC2DD Open API v1\uC744 \uC870\uD68C + \uC0AC\uC6A9\uC790 \uD655\uC778\uD615 \uC644\uB8CC \uC4F0\uAE30(\uD0DC\uC2A4\uD06C \uC644\uB8CC 1\uC885)\uB85C \uC0AC\uC6A9\uD569\uB2C8\uB2E4. \uD1A0\uD070 \uAC12\uC740 SecretStorage\uC5D0\uB9CC \uBCF4\uAD00\uB429\uB2C8\uB2E4."
     });
     const hasToken = Boolean(this.app.secretStorage.getSecret(this.plugin.settings.secretName));
     let pendingToken = "";
@@ -1081,7 +1139,7 @@ var TickTickTagProgressSettingTab = class extends import_obsidian2.PluginSetting
     }));
     new import_obsidian2.Setting(containerEl).setName("\uD1A0\uD070 \uC800\uC7A5 \uC0C1\uD0DC").setDesc(hasToken ? `\uC800\uC7A5\uB428 \xB7 SecretStorage ID: ${this.plugin.settings.secretName}` : "\uBBF8\uC124\uC815 \xB7 TickTick \uACC4\uC815\uC758 API Token\uC744 \uBC1C\uAE09\uBC1B\uC544 \uC704 \uC785\uB825\uB780\uC5D0 \uC800\uC7A5\uD558\uC138\uC694.");
     new import_obsidian2.Setting(containerEl).setName("\uC5F0\uACB0 \uD655\uC778").setDesc("\uD1A0\uD070\uC744 \uB85C\uADF8\uC5D0 \uB0A8\uAE30\uC9C0 \uC54A\uACE0 \uD504\uB85C\uC81D\uD2B8 \uBAA9\uB85D \uC77D\uAE30\uB9CC \uC2DC\uD5D8\uD569\uB2C8\uB2E4.").addButton((button2) => button2.setButtonText("\uACF5\uC2DD API \uD655\uC778").onClick(async () => this.plugin.testConnection()));
-    new import_obsidian2.Setting(containerEl).setName("\uD3EC\uD568 \uD0DC\uADF8").setDesc("\uC27C\uD45C\uB85C \uAD6C\uBD84\uD569\uB2C8\uB2E4. \uBE44\uC6CC \uB450\uBA74 \uBAA8\uB4E0 \uD0DC\uADF8\uB97C \uD45C\uC2DC\uD569\uB2C8\uB2E4.").addText((text) => text.setPlaceholder("UNIOS8K, UNI610H").setValue(this.plugin.settings.includeTags.join(", ")).onChange(async (value) => {
+    new import_obsidian2.Setting(containerEl).setName("\uD3EC\uD568 \uD0DC\uADF8").setDesc("\uC27C\uD45C\uB85C \uAD6C\uBD84\uD569\uB2C8\uB2E4. \uC785\uB825\uD55C \uC21C\uC11C\uAC00 \uB300\uC2DC\uBCF4\uB4DC \uD45C\uC2DC \uC21C\uC11C\uAC00 \uB429\uB2C8\uB2E4. \uBE44\uC6CC \uB450\uBA74 \uBAA8\uB4E0 \uD0DC\uADF8\uB97C \uD45C\uC2DC\uD569\uB2C8\uB2E4. TickTick \uC2E4\uC81C \uD0DC\uADF8 \uD45C\uAE30(\uC18C\uBB38\uC790)\uB97C \uC501\uB2C8\uB2E4.").addText((text) => text.setPlaceholder("uos8k, u610h").setValue(this.plugin.settings.includeTags.join(", ")).onChange(async (value) => {
       this.plugin.settings.includeTags = csv(value);
       await this.plugin.savePluginData();
       this.plugin.refreshViews();
@@ -1105,6 +1163,14 @@ var TickTickTagProgressSettingTab = class extends import_obsidian2.PluginSetting
     }));
     new import_obsidian2.Setting(containerEl).setName("Projects.base \uACBD\uB85C").setDesc("\uC0DD\uC131\uB41C \uB85C\uCEEC \uB178\uD2B8\uB97C \uC5EC\uB294 \uAE30\uC874 Base\uC785\uB2C8\uB2E4. \uC0C8 Base\uB294 \uB9CC\uB4E4\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.").addText((text) => text.setValue(this.plugin.settings.projectsBasePath).onChange(async (value) => {
       this.plugin.settings.projectsBasePath = value.trim();
+      await this.plugin.savePluginData();
+    }));
+    new import_obsidian2.Setting(containerEl).setName("\uD504\uB85C\uC81D\uD2B8 \uB8E8\uD2B8 \uD3F4\uB354").setDesc("\uD0DC\uC2A4\uD06C \uB178\uD2B8\uB97C \uB9CC\uB4E4 \uB54C \uD504\uB85C\uC81D\uD2B8 \uD3F4\uB354\uB97C \uCC3E\uB294 \uC0C1\uC704 \uD3F4\uB354\uC785\uB2C8\uB2E4. \uAE30\uBCF8 \u201C40. Projects\u201D.").addText((text) => text.setValue(this.plugin.settings.projectsRootFolder).onChange(async (value) => {
+      this.plugin.settings.projectsRootFolder = value.trim().replace(/\/+$/, "") || this.plugin.settings.projectsRootFolder;
+      await this.plugin.savePluginData();
+    }));
+    new import_obsidian2.Setting(containerEl).setName("\uD0DC\uC2A4\uD06C \uB178\uD2B8 \uD558\uC704 \uD3F4\uB354").setDesc("\uAC01 \uD504\uB85C\uC81D\uD2B8 \uD3F4\uB354 \uC548\uC5D0\uC11C TickTick \uB178\uD2B8\uB97C \uBAA8\uC73C\uB294 \uD558\uC704 \uD3F4\uB354\uBA85\uC785\uB2C8\uB2E4. \uAE30\uBCF8 \u201CTickTick Notes\u201D.").addText((text) => text.setValue(this.plugin.settings.taskNotesSubfolder).onChange(async (value) => {
+      this.plugin.settings.taskNotesSubfolder = value.trim().replace(/^\/+|\/+$/g, "") || this.plugin.settings.taskNotesSubfolder;
       await this.plugin.savePluginData();
     }));
     new import_obsidian2.Setting(containerEl).setName("Bases \uBDF0 \uC5F0\uACB0").setDesc("\uAE30\uC874 Projects.base\uC5D0 TickTick Task Notes \uBDF0\uAC00 \uC5C6\uC744 \uB54C\uB9CC \uC548\uC804\uD558\uAC8C \uCD94\uAC00\uD569\uB2C8\uB2E4.").addButton((button2) => button2.setButtonText("\uC5F0\uACB0 \uD655\uC778/\uCD94\uAC00").onClick(async () => this.plugin.ensureProjectsBase()));
@@ -1141,7 +1207,14 @@ function renderToolbar(root, model, actions) {
   next.addEventListener("click", () => actions.onMonthChange(1));
   monthNav.append(prev, month, next);
   const meta = element("div", "ttgp-toolbar-meta");
-  const status = element("span", `ttgp-status ttgp-status--${model.status}`, model.status === "complete" ? "\uC804\uCCB4 \uC870\uD68C" : model.status);
+  const statusLabels = {
+    complete: "\uC804\uCCB4 \uC870\uD68C",
+    partial: "\uBD80\uBD84 \uC870\uD68C",
+    stale: "\uC624\uB798\uB428",
+    syncing: "\uB3D9\uAE30\uD654 \uC911",
+    empty: "\uB370\uC774\uD130 \uC5C6\uC74C"
+  };
+  const status = element("span", `ttgp-status ttgp-status--${model.status}`, statusLabels[model.status] ?? model.status);
   const count = element("span", "ttgp-count", `\uC77C\uC815 \uD0DC\uC2A4\uD06C ${model.uniqueTaskCount}`);
   const synced = element("span", "ttgp-last-sync", model.lastSuccessAt ? `\uB9C8\uC9C0\uB9C9 \uC131\uACF5 ${new Date(model.lastSuccessAt).toLocaleString("ko-KR")}` : "\uB3D9\uAE30\uD654 \uAE30\uB85D \uC5C6\uC74C");
   meta.append(status, count, synced);
@@ -1156,7 +1229,7 @@ function renderHeader(root, month) {
   const header = element("div", "ttgp-grid-header");
   const tag = element("div", "ttgp-heading ttgp-heading--tag", "\uD0DC\uADF8");
   tag.dataset.column = "tag";
-  const progress = element("div", "ttgp-heading ttgp-heading--progress", "\uC9C4\uD589\uB960");
+  const progress = element("div", "ttgp-heading ttgp-heading--progress", "\uD0DC\uC2A4\uD06C \uC644\uB8CC\uC728");
   progress.dataset.column = "progress";
   const timeline = element("div", "ttgp-timeline-header");
   timeline.dataset.column = "timeline";
@@ -1484,7 +1557,11 @@ var TickTickTagProgressPlugin = class extends import_obsidian5.Plugin {
       },
       { sync: (month) => this.syncService.sync(month) }
     );
-    this.taskNotes = new TaskNoteRepository(new ObsidianTaskNotePort(this.app), this.settings.projectAliases);
+    this.taskNotes = new TaskNoteRepository(
+      new ObsidianTaskNotePort(this.app, this.settings.projectsRootFolder, this.settings.taskNotesSubfolder),
+      this.settings.projectAliases,
+      { rootFolder: this.settings.projectsRootFolder, taskNotesSubfolder: this.settings.taskNotesSubfolder }
+    );
     this.registerView(DASHBOARD_VIEW_TYPE, (leaf) => new GanttDashboardView(leaf, this));
     this.addRibbonIcon("chart-gantt", "TickTick \uD0DC\uADF8 \uC9C4\uD589\uB960", () => {
       void this.activateDashboard();
@@ -1546,9 +1623,10 @@ var TickTickTagProgressPlugin = class extends import_obsidian5.Plugin {
       return Boolean(start && due && clampTaskToMonth(start, due, month));
     });
     const failedAfterSnapshot = lastAttempt && lastAttempt.selectedMonth === month && lastAttempt.result !== "success" && lastAttempt.attemptedAt > snapshot.generatedAt;
+    const status = this.syncing ? "syncing" : failedAfterSnapshot ? "stale" : snapshot.coverage.status === "partial" ? "partial" : "complete";
     return {
       month,
-      status: this.syncing ? "syncing" : failedAfterSnapshot ? "stale" : "complete",
+      status,
       lastSuccessAt: snapshot.generatedAt,
       uniqueTaskCount: new Set(scheduled.map((task) => task.id)).size,
       selectedTagKey,

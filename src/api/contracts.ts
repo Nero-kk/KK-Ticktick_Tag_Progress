@@ -82,6 +82,7 @@ export interface SyncCoverage {
   failedCalls: Array<{ call: string; reason: string }>;
   openTaskCount: number;
   completedTaskCount: number;
+  unknownTaskCount: number;
 }
 
 export interface SyncSnapshot {

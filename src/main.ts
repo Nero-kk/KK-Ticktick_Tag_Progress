@@ -68,7 +68,11 @@ export default class TickTickTagProgressPlugin extends Plugin {
       },
       { sync: (month) => this.syncService.sync(month) },
     );
-    this.taskNotes = new TaskNoteRepository(new ObsidianTaskNotePort(this.app), this.settings.projectAliases);
+    this.taskNotes = new TaskNoteRepository(
+      new ObsidianTaskNotePort(this.app, this.settings.projectsRootFolder, this.settings.taskNotesSubfolder),
+      this.settings.projectAliases,
+      { rootFolder: this.settings.projectsRootFolder, taskNotesSubfolder: this.settings.taskNotesSubfolder },
+    );
 
     this.registerView(DASHBOARD_VIEW_TYPE, (leaf) => new GanttDashboardView(leaf, this));
     this.addRibbonIcon('chart-gantt', 'TickTick 태그 진행률', () => { void this.activateDashboard(); });
@@ -135,9 +139,13 @@ export default class TickTickTagProgressPlugin extends Plugin {
       && lastAttempt.selectedMonth === month
       && lastAttempt.result !== 'success'
       && lastAttempt.attemptedAt > snapshot.generatedAt;
+    const status = this.syncing ? 'syncing'
+      : failedAfterSnapshot ? 'stale'
+      : snapshot.coverage.status === 'partial' ? 'partial'
+      : 'complete';
     return {
       month,
-      status: this.syncing ? 'syncing' : failedAfterSnapshot ? 'stale' : 'complete',
+      status,
       lastSuccessAt: snapshot.generatedAt,
       uniqueTaskCount: new Set(scheduled.map((task) => task.id)).size,
       selectedTagKey,

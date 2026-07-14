@@ -71,7 +71,7 @@ function sanitizeTask(value: unknown): NormalizedTask | null {
 
 function sanitizeCoverage(value: unknown, selectedMonth: string): SyncCoverage | null {
   const item = record(value);
-  if (!item || item.status !== 'complete' || item.selectedMonth !== selectedMonth) return null;
+  if (!item || (item.status !== 'complete' && item.status !== 'partial') || item.selectedMonth !== selectedMonth) return null;
   const projectIds = stringArray(item.projectIds);
   const successfulCalls = stringArray(item.successfulCalls);
   if (!projectIds || !successfulCalls || !Array.isArray(item.failedCalls)
@@ -83,9 +83,12 @@ function sanitizeCoverage(value: unknown, selectedMonth: string): SyncCoverage |
     if (!entry || !nonEmptyString(entry.call) || typeof entry.reason !== 'string') return null;
     failedCalls.push({ call: entry.call, reason: entry.reason });
   }
+  const unknownTaskCount = typeof item.unknownTaskCount === 'number' && Number.isFinite(item.unknownTaskCount)
+    ? item.unknownTaskCount
+    : 0;
   return {
-    status: 'complete', selectedMonth, projectIds, successfulCalls, failedCalls,
-    openTaskCount: item.openTaskCount, completedTaskCount: item.completedTaskCount,
+    status: item.status, selectedMonth, projectIds, successfulCalls, failedCalls,
+    openTaskCount: item.openTaskCount, completedTaskCount: item.completedTaskCount, unknownTaskCount,
   };
 }
 
@@ -147,7 +150,9 @@ export class SnapshotStore {
 
   accept(snapshot: SyncSnapshot): void {
     const sanitized = sanitizeSnapshot(snapshot);
-    if (!sanitized || sanitized.coverage.status !== 'complete') throw new Error('Only valid complete snapshots can replace last-good');
+    if (!sanitized || (sanitized.coverage.status !== 'complete' && sanitized.coverage.status !== 'partial')) {
+      throw new Error('Only valid complete or partial snapshots can replace last-good');
+    }
     this.state.snapshots[sanitized.selectedMonth] = sanitized;
     this.state.lastAttempt = { selectedMonth: sanitized.selectedMonth, attemptedAt: sanitized.generatedAt, result: 'success' };
   }

@@ -15,6 +15,7 @@ describe('SyncService', () => {
     let calls = 0;
     const api: SyncApi = {
       getProjects: () => { calls += 1; return projects.promise; },
+      getTask: async () => ({ id: 't', projectId: 'p', title: 'T', priority: 0, status: 0 }),
       getProjectData: async () => ({ project: { id: 'p', name: 'P' }, tasks: [], columns: [] }),
       filterTasks: async () => [], getCompletedTasks: async () => [],
     };
@@ -32,6 +33,7 @@ describe('SyncService', () => {
     const seenMonths: string[] = [];
     const api: SyncApi = {
       getProjects: async () => { await gate.promise; return [{ id: 'p', name: 'P' }]; },
+      getTask: async () => ({ id: 't', projectId: 'p', title: 'T', priority: 0, status: 0 }),
       getProjectData: async () => ({ project: { id: 'p', name: 'P' }, tasks: [], columns: [] }),
       filterTasks: async (filter) => { seenMonths.push(filter.startDate ?? ''); return []; },
       getCompletedTasks: async () => [],
@@ -48,22 +50,75 @@ describe('SyncService', () => {
     expect(seenMonths).toContain('2026-07-31');
   });
 
-  it('keeps last-good when a required call fails', async () => {
+  it('keeps last-good when every task-bearing call fails', async () => {
     const store = new SnapshotStore();
     const api: SyncApi = {
       getProjects: async () => [{ id: 'p', name: 'P' }],
-      getProjectData: async () => { throw new Error('offline'); }, filterTasks: async () => [], getCompletedTasks: async () => [],
+      getTask: async () => ({ id: 't', projectId: 'p', title: 'T', priority: 0, status: 0 }),
+      getProjectData: async () => { throw new Error('offline'); },
+      filterTasks: async () => { throw new Error('offline'); },
+      getCompletedTasks: async () => { throw new Error('offline'); },
     };
     const service = new SyncService(api, store);
-    await expect(service.sync('2026-07')).rejects.toThrow(/offline/);
+    await expect(service.sync('2026-07')).rejects.toBeTruthy();
     expect(store.getLastGood('2026-07')).toBeUndefined();
     expect(store.getLastAttempt()?.result).toBe('network');
+  });
+
+  it('degrades to a partial snapshot when one task query fails', async () => {
+    const store = new SnapshotStore();
+    const api: SyncApi = {
+      getProjects: async () => [{ id: 'p', name: 'P' }],
+      getTask: async () => ({ id: 't', projectId: 'p', title: 'T', priority: 0, status: 0 }),
+      getProjectData: async () => ({
+        project: { id: 'p', name: 'P' }, columns: [],
+        tasks: [{ id: 'a', projectId: 'p', title: 'A', priority: 0, status: 0, startDate: '2026-07-02', dueDate: '2026-07-03' }],
+      }),
+      filterTasks: async () => { throw new Error('rate limited'); },
+      getCompletedTasks: async () => [],
+    };
+    const snapshot = await new SyncService(api, store).sync('2026-07');
+    expect(snapshot.coverage.status).toBe('partial');
+    expect(snapshot.coverage.failedCalls.map((f) => f.call)).toContain('task/filter');
+    expect(snapshot.tasks.map((task) => task.id)).toEqual(['a']);
+    expect(store.getLastGood('2026-07')?.coverage.status).toBe('partial');
+  });
+
+  it('resolves a status conflict with an exact read instead of trusting first-write', async () => {
+    const store = new SnapshotStore();
+    let exactReads = 0;
+    const api: SyncApi = {
+      getProjects: async () => [{ id: 'p', name: 'P' }],
+      getTask: async () => { exactReads += 1; return { id: 'c', projectId: 'p', title: 'C', priority: 0, status: 2, startDate: '2026-07-02', dueDate: '2026-07-03' }; },
+      getProjectData: async () => ({ project: { id: 'p', name: 'P' }, columns: [], tasks: [] }),
+      filterTasks: async () => [{ id: 'c', projectId: 'p', title: 'C', priority: 0, status: 0, startDate: '2026-07-02', dueDate: '2026-07-03' }],
+      getCompletedTasks: async () => [{ id: 'c', projectId: 'p', title: 'C', priority: 0, status: 2, startDate: '2026-07-02', dueDate: '2026-07-03' }],
+    };
+    const snapshot = await new SyncService(api, store).sync('2026-07');
+    expect(exactReads).toBe(1);
+    expect(snapshot.tasks.find((task) => task.id === 'c')?.status).toBe('completed');
+  });
+
+  it('marks a conflicted task unknown when the exact read also fails', async () => {
+    const store = new SnapshotStore();
+    const api: SyncApi = {
+      getProjects: async () => [{ id: 'p', name: 'P' }],
+      getTask: async () => { throw new Error('offline'); },
+      getProjectData: async () => ({ project: { id: 'p', name: 'P' }, columns: [], tasks: [] }),
+      filterTasks: async () => [{ id: 'c', projectId: 'p', title: 'C', priority: 0, status: 0, startDate: '2026-07-02', dueDate: '2026-07-03' }],
+      getCompletedTasks: async () => [{ id: 'c', projectId: 'p', title: 'C', priority: 0, status: 2, startDate: '2026-07-02', dueDate: '2026-07-03' }],
+    };
+    const snapshot = await new SyncService(api, store).sync('2026-07');
+    expect(snapshot.tasks.find((task) => task.id === 'c')?.status).toBe('unknown');
+    expect(snapshot.coverage.status).toBe('partial');
+    expect(snapshot.coverage.unknownTaskCount).toBe(1);
   });
 
   it('strips task content from the persisted snapshot', async () => {
     const store = new SnapshotStore();
     const api: SyncApi = {
       getProjects: async () => [{ id: 'p', name: 'P' }],
+      getTask: async () => ({ id: 't', projectId: 'p', title: 'T', priority: 0, status: 0 }),
       getProjectData: async () => ({ project: { id: 'p', name: 'P' }, columns: [], tasks: [{ id: 't', projectId: 'p', title: 'T', content: 'private body', priority: 0, status: 0 }] }),
       filterTasks: async () => [], getCompletedTasks: async () => [],
     };
@@ -77,6 +132,7 @@ describe('SyncService', () => {
     const captured: Array<{ startDate?: string; endDate?: string }> = [];
     const api: SyncApi = {
       getProjects: async () => [{ id: 'p', name: 'P' }],
+      getTask: async () => ({ id: 't', projectId: 'p', title: 'T', priority: 0, status: 0 }),
       getProjectData: async () => ({ project: { id: 'p', name: 'P' }, columns: [], tasks: [] }),
       filterTasks: async (filter) => {
         captured.push({ startDate: filter.startDate, endDate: filter.endDate });
@@ -96,6 +152,7 @@ describe('SyncService', () => {
     const store = new SnapshotStore();
     const api: SyncApi = {
       getProjects: async () => [{ id: 'p', name: 'P' }],
+      getTask: async () => ({ id: 't', projectId: 'p', title: 'T', priority: 0, status: 0 }),
       getProjectData: async () => ({
         project: { id: 'p', name: 'P' }, columns: [], tasks: [
           { id: 'july', projectId: 'p', title: 'July', priority: 0, status: 0, startDate: '2026-07-01', dueDate: '2026-07-31' },

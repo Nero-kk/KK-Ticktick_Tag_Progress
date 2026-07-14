@@ -27,7 +27,7 @@ describe('renderDashboard', () => {
     const root = document.createElement('div');
     renderDashboard(root, model, actions());
     expect(root.querySelector('[data-column="tag"]')?.textContent).toContain('태그');
-    expect(root.querySelector('[data-column="progress"]')?.textContent).toContain('진행률');
+    expect(root.querySelector('[data-column="progress"]')?.textContent).toContain('완료율');
     expect(root.querySelectorAll('.ttgp-day')).toHaveLength(31);
     expect((root.querySelector('.ttgp-segment--done') as HTMLElement).style.width).toBe('75%');
     expect(root.querySelector('[role="button"][aria-expanded="true"]')).not.toBeNull();

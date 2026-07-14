@@ -21,6 +21,19 @@ describe('loadSettings', () => {
     expect(loadSettings({ secretName: 'kjwl0902@gmail.com' }).secretName).toBe('ticktick-progress-api-token');
   });
 
+  it('defaults folder layout and completion TTL, trimming trailing slashes', () => {
+    expect(loadSettings({})).toMatchObject({
+      projectsRootFolder: '40. Projects', taskNotesSubfolder: 'TickTick Notes', completionTtlMinutes: 30,
+    });
+    expect(loadSettings({ projectsRootFolder: '10. Work/', taskNotesSubfolder: '/Notes/', completionTtlMinutes: 15 }))
+      .toMatchObject({ projectsRootFolder: '10. Work', taskNotesSubfolder: 'Notes', completionTtlMinutes: 15 });
+  });
+
+  it('rejects a non-positive completion TTL', () => {
+    expect(loadSettings({ completionTtlMinutes: 0 }).completionTtlMinutes).toBe(30);
+    expect(loadSettings({ completionTtlMinutes: -5 }).completionTtlMinutes).toBe(30);
+  });
+
   it('stores a pasted API token under the fixed plugin secret ID', () => {
     const store = (settingsModel as typeof settingsModel & {
       storeTickTickAccessToken?: (storage: { setSecret(id: string, value: string): void }, raw: string) => string;

@@ -4,7 +4,7 @@ import type { SyncSnapshot } from '../src/api/contracts';
 
 const good: SyncSnapshot = {
   schemaVersion: 2, selectedMonth: '2026-07', generatedAt: '2026-07-14T00:00:00Z',
-  coverage: { status: 'complete', selectedMonth: '2026-07', projectIds: ['p'], successfulCalls: ['project'], failedCalls: [], openTaskCount: 1, completedTaskCount: 0 },
+  coverage: { status: 'complete', selectedMonth: '2026-07', projectIds: ['p'], successfulCalls: ['project'], failedCalls: [], openTaskCount: 1, completedTaskCount: 0, unknownTaskCount: 0 },
   tasks: [{ id: 't', projectId: 'p', projectName: 'P', title: 'T', tags: ['A'], status: 'open', startAt: '2026-07-01', dueAt: '2026-07-02', isAllDay: true, localStartDate: '2026-07-01', localDueDate: '2026-07-02' }],
 };
 

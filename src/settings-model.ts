@@ -5,6 +5,8 @@ export interface TickTickTagProgressSettings {
   showUntagged: boolean;
   projectAliases: Record<string, string>;
   projectsBasePath: string;
+  projectsRootFolder: string;
+  taskNotesSubfolder: string;
   completionTtlMinutes: number;
 }
 
@@ -15,6 +17,8 @@ export const DEFAULT_SETTINGS: TickTickTagProgressSettings = {
   showUntagged: true,
   projectAliases: {},
   projectsBasePath: '90. Settings/Bases/Projects.base',
+  projectsRootFolder: '40. Projects',
+  taskNotesSubfolder: 'TickTick Notes',
   completionTtlMinutes: 30,
 };
 
@@ -65,6 +69,12 @@ export function loadSettings(raw: unknown): TickTickTagProgressSettings {
     projectsBasePath: typeof value.projectsBasePath === 'string' && value.projectsBasePath.trim()
       ? value.projectsBasePath.trim()
       : DEFAULT_SETTINGS.projectsBasePath,
+    projectsRootFolder: typeof value.projectsRootFolder === 'string' && value.projectsRootFolder.trim()
+      ? value.projectsRootFolder.trim().replace(/\/+$/, '')
+      : DEFAULT_SETTINGS.projectsRootFolder,
+    taskNotesSubfolder: typeof value.taskNotesSubfolder === 'string' && value.taskNotesSubfolder.trim()
+      ? value.taskNotesSubfolder.trim().replace(/^\/+|\/+$/g, '')
+      : DEFAULT_SETTINGS.taskNotesSubfolder,
     completionTtlMinutes: typeof value.completionTtlMinutes === 'number'
       && Number.isFinite(value.completionTtlMinutes) && value.completionTtlMinutes > 0
       ? value.completionTtlMinutes
