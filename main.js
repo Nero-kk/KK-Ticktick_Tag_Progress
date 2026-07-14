@@ -343,6 +343,20 @@ var UNTAGGED_DISPLAY = "\uBBF8\uBD84\uB958";
 function normalizeTagKey(tag) {
   return tag.normalize("NFKC").toLocaleLowerCase("en-US");
 }
+function orderTagRows(rows, includeTags) {
+  const order = new Map(includeTags.map((tag, index) => [normalizeTagKey(tag), index]));
+  return [...rows].sort((a, b) => {
+    const aUntagged = a.tagKey === UNTAGGED_KEY;
+    const bUntagged = b.tagKey === UNTAGGED_KEY;
+    if (aUntagged !== bUntagged) return aUntagged ? 1 : -1;
+    const aRank = order.get(a.tagKey);
+    const bRank = order.get(b.tagKey);
+    if (aRank !== void 0 && bRank !== void 0) return aRank - bRank;
+    if (aRank !== void 0) return -1;
+    if (bRank !== void 0) return 1;
+    return a.tagKey.localeCompare(b.tagKey);
+  });
+}
 function aggregateTagProgress(input, month, options = {}) {
   const uniqueTasks = /* @__PURE__ */ new Map();
   for (const task of input) if (!uniqueTasks.has(task.id)) uniqueTasks.set(task.id, task);
@@ -1278,9 +1292,10 @@ function renderHeader(root, month) {
 function renderRows(root, model, actions) {
   const rows = element("div", "ttgp-rows");
   const dayCount = daysInMonth(model.month);
-  for (const row of model.rows) {
+  for (const [index, row] of model.rows.entries()) {
     const selected = row.tagKey === model.selectedTagKey;
-    const rowEl = element("div", `ttgp-row${selected ? " is-selected" : ""}`);
+    const startsUntaggedGroup = row.tagKey === UNTAGGED_KEY && index > 0;
+    const rowEl = element("div", `ttgp-row${selected ? " is-selected" : ""}${startsUntaggedGroup ? " ttgp-row--untagged-group" : ""}`);
     rowEl.setAttribute("role", "button");
     rowEl.tabIndex = 0;
     rowEl.setAttribute("aria-expanded", String(selected));
@@ -1649,7 +1664,8 @@ var TickTickTagProgressPlugin = class extends import_obsidian5.Plugin {
     }
     const include = new Set(this.settings.includeTags.map(normalizeTagKey));
     const exclude = new Set(this.settings.excludeTags.map(normalizeTagKey));
-    const rows = aggregateTagProgress(snapshot.tasks, month, { showUntagged: this.settings.showUntagged }).filter((row) => row.tagKey === UNTAGGED_KEY ? this.settings.showUntagged : (include.size === 0 || include.has(row.tagKey)) && !exclude.has(row.tagKey));
+    const filteredRows = aggregateTagProgress(snapshot.tasks, month, { showUntagged: this.settings.showUntagged }).filter((row) => row.tagKey === UNTAGGED_KEY ? this.settings.showUntagged : (include.size === 0 || include.has(row.tagKey)) && !exclude.has(row.tagKey));
+    const rows = orderTagRows(filteredRows, this.settings.includeTags);
     const scheduled = snapshot.tasks.filter((task) => {
       const start = task.localStartDate ?? task.localDueDate;
       const due = task.localDueDate ?? task.localStartDate;

@@ -1,5 +1,6 @@
 import type { NormalizedTask, TagProgress } from '../api/contracts';
 import { daysInMonth } from '../core/period';
+import { UNTAGGED_KEY } from '../core/tag-progress-aggregator';
 
 export interface DashboardSummary {
   activeProjectCount: number;
@@ -133,9 +134,11 @@ function renderHeader(root: HTMLElement, month: string): void {
 function renderRows(root: HTMLElement, model: DashboardModel, actions: DashboardActions): void {
   const rows = element('div', 'ttgp-rows');
   const dayCount = daysInMonth(model.month);
-  for (const row of model.rows) {
+  for (const [index, row] of model.rows.entries()) {
     const selected = row.tagKey === model.selectedTagKey;
-    const rowEl = element('div', `ttgp-row${selected ? ' is-selected' : ''}`);
+    // Visually separate the untagged "기타" group from the project rows above it.
+    const startsUntaggedGroup = row.tagKey === UNTAGGED_KEY && index > 0;
+    const rowEl = element('div', `ttgp-row${selected ? ' is-selected' : ''}${startsUntaggedGroup ? ' ttgp-row--untagged-group' : ''}`);
     rowEl.setAttribute('role', 'button');
     rowEl.tabIndex = 0;
     rowEl.setAttribute('aria-expanded', String(selected));

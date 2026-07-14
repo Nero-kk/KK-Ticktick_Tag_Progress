@@ -17,6 +17,26 @@ export function normalizeTagKey(tag: string): string {
   return tag.normalize('NFKC').toLocaleLowerCase('en-US');
 }
 
+/**
+ * Orders rows for the portfolio view: tags listed in `includeTags` follow that
+ * order (user-chosen priority), any remaining tags stay alphabetical, and the
+ * untagged bucket is always pinned last as its own "기타" group.
+ */
+export function orderTagRows(rows: TagProgress[], includeTags: string[]): TagProgress[] {
+  const order = new Map(includeTags.map((tag, index) => [normalizeTagKey(tag), index]));
+  return [...rows].sort((a, b) => {
+    const aUntagged = a.tagKey === UNTAGGED_KEY;
+    const bUntagged = b.tagKey === UNTAGGED_KEY;
+    if (aUntagged !== bUntagged) return aUntagged ? 1 : -1;
+    const aRank = order.get(a.tagKey);
+    const bRank = order.get(b.tagKey);
+    if (aRank !== undefined && bRank !== undefined) return aRank - bRank;
+    if (aRank !== undefined) return -1;
+    if (bRank !== undefined) return 1;
+    return a.tagKey.localeCompare(b.tagKey);
+  });
+}
+
 export function aggregateTagProgress(
   input: NormalizedTask[],
   month: string,

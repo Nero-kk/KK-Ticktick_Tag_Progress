@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { aggregateTagProgress, UNTAGGED_KEY } from '../src/core/tag-progress-aggregator';
-import type { NormalizedTask } from '../src/api/contracts';
+import { aggregateTagProgress, orderTagRows, UNTAGGED_KEY } from '../src/core/tag-progress-aggregator';
+import type { NormalizedTask, TagProgress } from '../src/api/contracts';
 
 function task(
   id: string,
@@ -50,6 +50,18 @@ describe('aggregateTagProgress', () => {
     expect(aggregateTagProgress([untagged], '2026-07')).toEqual([]);
     const [row] = aggregateTagProgress([untagged], '2026-07', { showUntagged: true });
     expect(row).toMatchObject({ tagKey: UNTAGGED_KEY, displayName: '미분류', total: 1 });
+  });
+
+  it('orders rows by include priority, then alphabetically, with untagged pinned last', () => {
+    const row = (tagKey: string): TagProgress => ({
+      tagKey, displayName: tagKey, completed: 0, open: 1, total: 1, percent: 0,
+      clippedBeforeMonth: false, clippedAfterMonth: false, hasUnscheduledTasks: false, unscheduledCount: 0, taskIds: [],
+    });
+    const ordered = orderTagRows(
+      [row('zeta'), row(UNTAGGED_KEY), row('u610h'), row('alpha'), row('uos8k')],
+      ['uos8k', 'u610h'],
+    );
+    expect(ordered.map((r) => r.tagKey)).toEqual(['uos8k', 'u610h', 'alpha', 'zeta', UNTAGGED_KEY]);
   });
 
   it('keeps a real "미분류" tag separate from the reserved untagged row', () => {
