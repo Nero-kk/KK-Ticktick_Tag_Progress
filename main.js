@@ -280,6 +280,14 @@ function daysInMonth(month) {
 function getMonthRange(month) {
   return { startDate: `${month}-01`, endDate: `${month}-${String(daysInMonth(month)).padStart(2, "0")}` };
 }
+function shiftDate(date, deltaDays) {
+  const time = Date.parse(`${date}T00:00:00Z`) + deltaDays * 864e5;
+  return new Date(time).toISOString().slice(0, 10);
+}
+function getQueryRange(month) {
+  const range = getMonthRange(month);
+  return { startDate: shiftDate(range.startDate, -1), endDate: shiftDate(range.endDate, 1) };
+}
 function datePart(value) {
   const match = /^(\d{4}-\d{2}-\d{2})/.exec(value);
   return match?.[1] ?? null;
@@ -595,16 +603,15 @@ var SyncService = class {
     try {
       const [projects] = await Promise.all([this.api.getProjects(), this.api.getTags()]);
       const projectIds = projects.filter((project) => !project.closed).map((project) => project.id);
-      const range = getMonthRange(selectedMonth);
+      const queryRange = getQueryRange(selectedMonth);
       const [projectData, filtered, completed] = await Promise.all([
         Promise.all(projectIds.map((id) => this.api.getProjectData(id))),
-        this.api.filterTasks({ projectIds, ...range, status: [0, 2] }),
-        this.api.getCompletedTasks({ projectIds, ...range })
+        this.api.filterTasks({ projectIds, ...queryRange, status: [0, 2] }),
+        this.api.getCompletedTasks({ projectIds, ...queryRange })
       ]);
       const projectNames = new Map(projects.map((project) => [project.id, project.name]));
       const fallbackTimeZone = systemTimeZone();
-      const rawById = /* @__PURE__ */ new Map();
-      const projectDataInScope = projectData.flatMap((data) => data.tasks).filter((raw) => {
+      const inScope = (raw) => {
         const start = raw.startDate ?? raw.dueDate;
         const due = raw.dueDate ?? raw.startDate;
         if (!start && !due) return true;
@@ -612,9 +619,11 @@ var SyncService = class {
         const localStart = start ? toLocalDate(start, raw.timeZone, isAllDay, fallbackTimeZone) : null;
         const localDue = due ? toLocalDate(due, raw.timeZone, isAllDay, fallbackTimeZone) : null;
         return Boolean(localStart && localDue && clampTaskToMonth(localStart, localDue, selectedMonth));
-      });
-      for (const raw of [...filtered, ...completed, ...projectDataInScope]) {
-        if (raw?.id && !rawById.has(raw.id)) rawById.set(raw.id, raw);
+      };
+      const rawById = /* @__PURE__ */ new Map();
+      const allRaw = [...filtered, ...completed, ...projectData.flatMap((data) => data.tasks)];
+      for (const raw of allRaw) {
+        if (raw?.id && !rawById.has(raw.id) && inScope(raw)) rawById.set(raw.id, raw);
       }
       const tasks = [...rawById.values()].map((raw) => {
         const normalized = normalizeTask(raw, projectNames.get(raw.projectId) ?? raw.projectId, fallbackTimeZone);
