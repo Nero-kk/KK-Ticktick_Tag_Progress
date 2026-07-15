@@ -24,6 +24,43 @@ __export(main_exports, {
 module.exports = __toCommonJS(main_exports);
 var import_obsidian5 = require("obsidian");
 
+// src/notes/project-mapper.ts
+function key(value) {
+  return value.normalize("NFKC").trim().toUpperCase();
+}
+function equivalentKeys(value) {
+  const normalized = key(value);
+  const candidates = /* @__PURE__ */ new Set([normalized]);
+  const uni = /^UNI(.+)$/.exec(normalized);
+  if (uni?.[1]) {
+    candidates.add(`U${uni[1]}`);
+    candidates.add(uni[1]);
+  }
+  const shortU = /^U(.+)$/.exec(normalized);
+  if (shortU?.[1]) {
+    candidates.add(`UNI${shortU[1]}`);
+    candidates.add(shortU[1]);
+  }
+  if (!normalized.startsWith("U")) {
+    candidates.add(`U${normalized}`);
+    candidates.add(`UNI${normalized}`);
+  }
+  return candidates;
+}
+function resolveCanonicalProject(projectName, canonicalFolders, explicitAliases) {
+  const folders = new Map(canonicalFolders.map((folder) => [key(folder), folder]));
+  const direct = folders.get(key(projectName));
+  if (direct) return direct;
+  const aliasTarget = Object.entries(explicitAliases).find(([alias]) => key(alias) === key(projectName))?.[1];
+  if (aliasTarget) return folders.get(key(aliasTarget)) ?? null;
+  const inputKeys = equivalentKeys(projectName);
+  const matches = canonicalFolders.filter((folder) => {
+    const folderKeys = equivalentKeys(folder);
+    return [...inputKeys].some((candidate) => folderKeys.has(candidate));
+  });
+  return matches.length === 1 ? matches[0] ?? null : null;
+}
+
 // src/api/contract-validator.ts
 function record(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
@@ -104,6 +141,7 @@ var TickTickHttpError = class extends Error {
 };
 function kindForStatus(status) {
   if (status === 401 || status === 403) return "auth";
+  if (status === 404) return "not-found";
   if (status === 429) return "rate-limit";
   if (status >= 500) return "server";
   return "contract";
@@ -146,7 +184,7 @@ var OfficialOpenApiClient = class {
       );
     });
   }
-  async request(method, path, body) {
+  async request(method, path, body, options = {}) {
     this.guard.assertAllowed(method, path);
     const token = await this.tokenProvider();
     if (!token) throw new TickTickHttpError(401, "auth", "TickTick API token is not configured");
@@ -159,6 +197,7 @@ var OfficialOpenApiClient = class {
       },
       ...body === void 0 ? {} : { body: JSON.stringify(body) }
     };
+    if (options.retry === false) return this.requestOnce(apiRequest);
     for (let attempt = 0; attempt < 4; attempt += 1) {
       let response;
       try {
@@ -179,6 +218,23 @@ var OfficialOpenApiClient = class {
       throw new TickTickHttpError(response.status, kindForStatus(response.status));
     }
     throw new TickTickHttpError(0, "network", "TickTick retry budget exhausted");
+  }
+  /**
+   * Single-shot request for write operations. A completion POST is never retried:
+   * a timeout or 5xx after the request left the client leaves the result
+   * indeterminate, so it surfaces as `unknown-outcome` for the caller to confirm
+   * with an exact read rather than blindly resending.
+   */
+  async requestOnce(apiRequest) {
+    let response;
+    try {
+      response = await this.callWithTimeout(apiRequest);
+    } catch {
+      throw new TickTickHttpError(0, "unknown-outcome", "TickTick write result is unconfirmed");
+    }
+    if (response.status >= 200 && response.status < 300) return response.json;
+    if (response.status >= 500) throw new TickTickHttpError(response.status, "unknown-outcome", "TickTick write result is unconfirmed");
+    throw new TickTickHttpError(response.status, kindForStatus(response.status));
   }
   async getProjects() {
     return this.validate(parseProjects, await this.request("GET", "/project"));
@@ -201,7 +257,9 @@ var OfficialOpenApiClient = class {
   async completeTask(projectId, taskId) {
     await this.request(
       "POST",
-      `/project/${encodeURIComponent(projectId)}/task/${encodeURIComponent(taskId)}/complete`
+      `/project/${encodeURIComponent(projectId)}/task/${encodeURIComponent(taskId)}/complete`,
+      void 0,
+      { retry: false }
     );
   }
 };
@@ -280,6 +338,14 @@ function daysInMonth(month) {
 function getMonthRange(month) {
   return { startDate: `${month}-01`, endDate: `${month}-${String(daysInMonth(month)).padStart(2, "0")}` };
 }
+function shiftDate(date, deltaDays) {
+  const time = Date.parse(`${date}T00:00:00Z`) + deltaDays * 864e5;
+  return new Date(time).toISOString().slice(0, 10);
+}
+function getQueryRange(month) {
+  const range = getMonthRange(month);
+  return { startDate: shiftDate(range.startDate, -1), endDate: shiftDate(range.endDate, 1) };
+}
 function datePart(value) {
   const match = /^(\d{4}-\d{2}-\d{2})/.exec(value);
   return match?.[1] ?? null;
@@ -309,8 +375,24 @@ function clampTaskToMonth(start, due, month) {
 }
 
 // src/core/tag-progress-aggregator.ts
+var UNTAGGED_KEY = "__untagged__";
+var UNTAGGED_DISPLAY = "\uBBF8\uBD84\uB958";
 function normalizeTagKey(tag) {
   return tag.normalize("NFKC").toLocaleLowerCase("en-US");
+}
+function orderTagRows(rows, includeTags) {
+  const order = new Map(includeTags.map((tag, index) => [normalizeTagKey(tag), index]));
+  return [...rows].sort((a, b) => {
+    const aUntagged = a.tagKey === UNTAGGED_KEY;
+    const bUntagged = b.tagKey === UNTAGGED_KEY;
+    if (aUntagged !== bUntagged) return aUntagged ? 1 : -1;
+    const aRank = order.get(a.tagKey);
+    const bRank = order.get(b.tagKey);
+    if (aRank !== void 0 && bRank !== void 0) return aRank - bRank;
+    if (aRank !== void 0) return -1;
+    if (bRank !== void 0) return 1;
+    return a.tagKey.localeCompare(b.tagKey);
+  });
 }
 function aggregateTagProgress(input, month, options = {}) {
   const uniqueTasks = /* @__PURE__ */ new Map();
@@ -318,21 +400,20 @@ function aggregateTagProgress(input, month, options = {}) {
   const rows = /* @__PURE__ */ new Map();
   for (const task of uniqueTasks.values()) {
     if (task.status !== "open" && task.status !== "completed") continue;
-    const rawTags = task.tags.length > 0 ? task.tags : options.showUntagged ? ["\uBBF8\uBD84\uB958"] : [];
-    if (rawTags.length === 0) continue;
-    const start = task.startAt ?? task.dueAt;
-    const due = task.dueAt ?? task.startAt;
+    const tagEntries = task.tags.length > 0 ? task.tags.map((raw) => ({ tagKey: normalizeTagKey(raw), displayName: raw.normalize("NFKC") })) : options.showUntagged ? [{ tagKey: UNTAGGED_KEY, displayName: UNTAGGED_DISPLAY }] : [];
+    if (tagEntries.length === 0) continue;
+    const start = task.localStartDate ?? task.localDueDate;
+    const due = task.localDueDate ?? task.localStartDate;
     const span = start && due ? clampTaskToMonth(start, due, month) : null;
     const unscheduled = !start && !due;
     if (!span && !unscheduled) continue;
     const seenTags = /* @__PURE__ */ new Set();
-    for (const rawTag of rawTags) {
-      const tagKey = normalizeTagKey(rawTag);
+    for (const { tagKey, displayName } of tagEntries) {
       if (seenTags.has(tagKey)) continue;
       seenTags.add(tagKey);
       const row = rows.get(tagKey) ?? {
         tagKey,
-        displayName: rawTag.normalize("NFKC"),
+        displayName,
         completed: 0,
         open: 0,
         total: 0,
@@ -347,6 +428,13 @@ function aggregateTagProgress(input, month, options = {}) {
       if (!row.taskIdSet.has(task.id)) {
         row.taskIdSet.add(task.id);
         row.taskIds.push(task.id);
+        if (task.status === "completed" && task.completedAt) {
+          const completedMs = Date.parse(task.completedAt);
+          if (Number.isFinite(completedMs) && (row.lastCompletedMs === void 0 || completedMs > row.lastCompletedMs)) {
+            row.lastCompletedMs = completedMs;
+            row.lastCompletedAt = task.completedAt;
+          }
+        }
         if (unscheduled) {
           row.hasUnscheduledTasks = true;
           row.unscheduledCount += 1;
@@ -363,7 +451,43 @@ function aggregateTagProgress(input, month, options = {}) {
       rows.set(tagKey, row);
     }
   }
-  return [...rows.values()].filter((row) => row.total > 0 || row.unscheduledCount > 0).sort((a, b) => a.tagKey.localeCompare(b.tagKey)).map(({ taskIdSet: _taskIdSet, ...row }) => row);
+  return [...rows.values()].filter((row) => row.total > 0 || row.unscheduledCount > 0).sort((a, b) => a.tagKey.localeCompare(b.tagKey)).map(({ taskIdSet: _taskIdSet, lastCompletedMs: _lastCompletedMs, ...row }) => row);
+}
+
+// src/core/local-date.ts
+var DATE_PREFIX = /^(\d{4}-\d{2}-\d{2})/;
+function systemTimeZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+function isValidTimeZone(timeZone) {
+  try {
+    new Intl.DateTimeFormat("en-CA", { timeZone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function formatInZone(instant, timeZone) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(new Date(instant));
+}
+function toLocalDate(iso, timeZone, isAllDay, fallbackTimeZone) {
+  const match = DATE_PREFIX.exec(iso);
+  if (!match) return null;
+  const datePart2 = match[1];
+  if (isAllDay) return datePart2;
+  const instant = Date.parse(iso);
+  if (!Number.isFinite(instant)) return datePart2;
+  const zone = timeZone && isValidTimeZone(timeZone) ? timeZone : fallbackTimeZone;
+  return formatInZone(instant, zone);
 }
 
 // src/core/normalizer.ts
@@ -377,11 +501,17 @@ function normalizeStatus(status) {
   if (status === -1) return "abandoned";
   return "unknown";
 }
-function normalizeTask(raw, projectName) {
+function normalizeTask(raw, projectName, fallbackTimeZone = systemTimeZone()) {
   const id = requireString(raw.id, "id");
   const projectId = requireString(raw.projectId, "projectId");
   const title = requireString(raw.title, "title");
   const body = typeof raw.content === "string" ? raw.content : typeof raw.desc === "string" ? raw.desc : void 0;
+  const startAt = typeof raw.startDate === "string" ? raw.startDate : void 0;
+  const dueAt = typeof raw.dueDate === "string" ? raw.dueDate : void 0;
+  const timeZone = typeof raw.timeZone === "string" ? raw.timeZone : void 0;
+  const isAllDay = raw.isAllDay === true;
+  const localStartDate = startAt ? toLocalDate(startAt, timeZone, isAllDay, fallbackTimeZone) : null;
+  const localDueDate = dueAt ? toLocalDate(dueAt, timeZone, isAllDay, fallbackTimeZone) : null;
   return {
     id,
     projectId,
@@ -390,11 +520,13 @@ function normalizeTask(raw, projectName) {
     ...body === void 0 ? {} : { content: body },
     tags: Array.isArray(raw.tags) ? raw.tags.filter((tag) => typeof tag === "string" && tag.trim() !== "") : [],
     status: normalizeStatus(raw.status),
-    ...typeof raw.startDate === "string" ? { startAt: raw.startDate } : {},
-    ...typeof raw.dueDate === "string" ? { dueAt: raw.dueDate } : {},
+    ...startAt === void 0 ? {} : { startAt },
+    ...dueAt === void 0 ? {} : { dueAt },
     ...typeof raw.completedTime === "string" ? { completedAt: raw.completedTime } : {},
-    ...typeof raw.timeZone === "string" ? { timeZone: raw.timeZone } : {},
-    isAllDay: raw.isAllDay === true
+    ...timeZone === void 0 ? {} : { timeZone },
+    isAllDay,
+    ...localStartDate ? { localStartDate } : {},
+    ...localDueDate ? { localDueDate } : {}
   };
 }
 
@@ -420,6 +552,12 @@ function sanitizeTask(value) {
   const tags = stringArray(item.tags);
   const statuses = ["open", "completed", "abandoned", "unknown"];
   if (!tags || typeof item.status !== "string" || !statuses.includes(item.status) || typeof item.isAllDay !== "boolean") return null;
+  const startAt = optionalString(item.startAt);
+  const dueAt = optionalString(item.dueAt);
+  const timeZone = optionalString(item.timeZone);
+  const fallbackTimeZone = systemTimeZone();
+  const localStartDate = startAt ? toLocalDate(startAt, timeZone, item.isAllDay, fallbackTimeZone) : null;
+  const localDueDate = dueAt ? toLocalDate(dueAt, timeZone, item.isAllDay, fallbackTimeZone) : null;
   return {
     id: item.id,
     projectId: item.projectId,
@@ -427,16 +565,18 @@ function sanitizeTask(value) {
     title: item.title,
     tags,
     status: item.status,
-    ...optionalString(item.startAt) === void 0 ? {} : { startAt: optionalString(item.startAt) },
-    ...optionalString(item.dueAt) === void 0 ? {} : { dueAt: optionalString(item.dueAt) },
+    ...startAt === void 0 ? {} : { startAt },
+    ...dueAt === void 0 ? {} : { dueAt },
     ...optionalString(item.completedAt) === void 0 ? {} : { completedAt: optionalString(item.completedAt) },
-    ...optionalString(item.timeZone) === void 0 ? {} : { timeZone: optionalString(item.timeZone) },
-    isAllDay: item.isAllDay
+    ...timeZone === void 0 ? {} : { timeZone },
+    isAllDay: item.isAllDay,
+    ...localStartDate ? { localStartDate } : {},
+    ...localDueDate ? { localDueDate } : {}
   };
 }
 function sanitizeCoverage(value, selectedMonth) {
   const item = record2(value);
-  if (!item || item.status !== "complete" || item.selectedMonth !== selectedMonth) return null;
+  if (!item || item.status !== "complete" && item.status !== "partial" || item.selectedMonth !== selectedMonth) return null;
   const projectIds = stringArray(item.projectIds);
   const successfulCalls = stringArray(item.successfulCalls);
   if (!projectIds || !successfulCalls || !Array.isArray(item.failedCalls) || typeof item.openTaskCount !== "number" || !Number.isFinite(item.openTaskCount) || typeof item.completedTaskCount !== "number" || !Number.isFinite(item.completedTaskCount)) return null;
@@ -446,19 +586,21 @@ function sanitizeCoverage(value, selectedMonth) {
     if (!entry || !nonEmptyString2(entry.call) || typeof entry.reason !== "string") return null;
     failedCalls.push({ call: entry.call, reason: entry.reason });
   }
+  const unknownTaskCount = typeof item.unknownTaskCount === "number" && Number.isFinite(item.unknownTaskCount) ? item.unknownTaskCount : 0;
   return {
-    status: "complete",
+    status: item.status,
     selectedMonth,
     projectIds,
     successfulCalls,
     failedCalls,
     openTaskCount: item.openTaskCount,
-    completedTaskCount: item.completedTaskCount
+    completedTaskCount: item.completedTaskCount,
+    unknownTaskCount
   };
 }
 function sanitizeSnapshot(value) {
   const item = record2(value);
-  if (!item || item.schemaVersion !== 1 || !nonEmptyString2(item.selectedMonth) || !/^\d{4}-(0[1-9]|1[0-2])$/.test(item.selectedMonth) || !nonEmptyString2(item.generatedAt) || !Array.isArray(item.tasks)) return null;
+  if (!item || item.schemaVersion !== 1 && item.schemaVersion !== 2 || !nonEmptyString2(item.selectedMonth) || !/^\d{4}-(0[1-9]|1[0-2])$/.test(item.selectedMonth) || !nonEmptyString2(item.generatedAt) || !Array.isArray(item.tasks)) return null;
   const coverage = sanitizeCoverage(item.coverage, item.selectedMonth);
   if (!coverage) return null;
   const tasks = [];
@@ -468,7 +610,7 @@ function sanitizeSnapshot(value) {
     tasks.push(sanitized);
   }
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     selectedMonth: item.selectedMonth,
     generatedAt: item.generatedAt,
     coverage,
@@ -506,7 +648,9 @@ var SnapshotStore = class {
   }
   accept(snapshot) {
     const sanitized = sanitizeSnapshot(snapshot);
-    if (!sanitized || sanitized.coverage.status !== "complete") throw new Error("Only valid complete snapshots can replace last-good");
+    if (!sanitized || sanitized.coverage.status !== "complete" && sanitized.coverage.status !== "partial") {
+      throw new Error("Only valid complete or partial snapshots can replace last-good");
+    }
     this.state.snapshots[sanitized.selectedMonth] = sanitized;
     this.state.lastAttempt = { selectedMonth: sanitized.selectedMonth, attemptedAt: sanitized.generatedAt, result: "success" };
   }
@@ -517,6 +661,9 @@ var SnapshotStore = class {
     const snapshot = this.state.snapshots[selectedMonth];
     return snapshot ? clone(snapshot) : void 0;
   }
+  listSnapshots() {
+    return Object.values(this.state.snapshots).map(clone);
+  }
   getLastAttempt() {
     return this.state.lastAttempt ? clone(this.state.lastAttempt) : void 0;
   }
@@ -526,67 +673,126 @@ var SnapshotStore = class {
 };
 
 // src/core/sync-service.ts
+function failureReason(error) {
+  if (error instanceof TickTickHttpError) return error.kind;
+  return error instanceof Error ? error.message : "unknown";
+}
 var SyncService = class {
   constructor(api, store) {
     this.api = api;
     this.store = store;
   }
-  inFlight = null;
+  inFlight = /* @__PURE__ */ new Map();
   sync(selectedMonth) {
-    if (this.inFlight) return this.inFlight;
-    this.inFlight = this.performSync(selectedMonth).finally(() => {
-      this.inFlight = null;
+    const existing = this.inFlight.get(selectedMonth);
+    if (existing) return existing;
+    const flight = this.performSync(selectedMonth).finally(() => {
+      if (this.inFlight.get(selectedMonth) === flight) this.inFlight.delete(selectedMonth);
     });
-    return this.inFlight;
+    this.inFlight.set(selectedMonth, flight);
+    return flight;
   }
   async performSync(selectedMonth) {
     try {
-      const [projects] = await Promise.all([this.api.getProjects(), this.api.getTags()]);
+      const projects = await this.api.getProjects();
       const projectIds = projects.filter((project) => !project.closed).map((project) => project.id);
-      const range = getMonthRange(selectedMonth);
-      const [projectData, filtered, completed] = await Promise.all([
-        Promise.all(projectIds.map((id) => this.api.getProjectData(id))),
-        this.api.filterTasks({ projectIds, ...range, status: [0, 2] }),
-        this.api.getCompletedTasks({ projectIds, ...range })
+      const queryRange = getQueryRange(selectedMonth);
+      const successfulCalls = ["project"];
+      const failedCalls = [];
+      const projectData = await Promise.all(projectIds.map(async (id) => {
+        try {
+          const data = await this.api.getProjectData(id);
+          successfulCalls.push(`project/${id}/data`);
+          return data;
+        } catch (error) {
+          failedCalls.push({ call: `project/${id}/data`, reason: failureReason(error) });
+          return null;
+        }
+      }));
+      const [filteredResult, completedResult] = await Promise.allSettled([
+        this.api.filterTasks({ projectIds, ...queryRange, status: [0, 2] }),
+        this.api.getCompletedTasks({ projectIds, ...queryRange })
       ]);
+      const filtered = this.unwrap(filteredResult, "task/filter", successfulCalls, failedCalls);
+      const completed = this.unwrap(completedResult, "task/completed", successfulCalls, failedCalls);
+      if (successfulCalls.length === 1 && failedCalls.length > 0) {
+        throw new TickTickHttpError(0, "network", "TickTick sync produced no usable data");
+      }
       const projectNames = new Map(projects.map((project) => [project.id, project.name]));
-      const rawById = /* @__PURE__ */ new Map();
-      const projectDataInScope = projectData.flatMap((data) => data.tasks).filter((raw) => {
+      const fallbackTimeZone = systemTimeZone();
+      const inScope = (raw) => {
         const start = raw.startDate ?? raw.dueDate;
         const due = raw.dueDate ?? raw.startDate;
-        return !start && !due || Boolean(start && due && clampTaskToMonth(start, due, selectedMonth));
-      });
-      for (const raw of [...filtered, ...completed, ...projectDataInScope]) {
-        if (raw?.id && !rawById.has(raw.id)) rawById.set(raw.id, raw);
+        if (!start && !due) return true;
+        const isAllDay = raw.isAllDay === true;
+        const localStart = start ? toLocalDate(start, raw.timeZone, isAllDay, fallbackTimeZone) : null;
+        const localDue = due ? toLocalDate(due, raw.timeZone, isAllDay, fallbackTimeZone) : null;
+        return Boolean(localStart && localDue && clampTaskToMonth(localStart, localDue, selectedMonth));
+      };
+      const rawById = /* @__PURE__ */ new Map();
+      const statusById = /* @__PURE__ */ new Map();
+      const allRaw = [
+        ...filtered,
+        ...completed,
+        ...projectData.flatMap((data) => data?.tasks ?? [])
+      ];
+      for (const raw of allRaw) {
+        if (!raw?.id || !inScope(raw)) continue;
+        const seen = statusById.get(raw.id) ?? /* @__PURE__ */ new Set();
+        seen.add(raw.status);
+        statusById.set(raw.id, seen);
+        if (!rawById.has(raw.id)) rawById.set(raw.id, raw);
+      }
+      for (const [id, statuses] of statusById) {
+        if (statuses.size <= 1) continue;
+        const raw = rawById.get(id);
+        try {
+          const exact = await this.api.getTask(raw.projectId, id);
+          rawById.set(id, exact);
+          successfulCalls.push(`project/${raw.projectId}/task/${id}`);
+        } catch (error) {
+          rawById.set(id, { ...raw, status: 9 });
+          failedCalls.push({ call: `project/${raw.projectId}/task/${id}`, reason: failureReason(error) });
+        }
       }
       const tasks = [...rawById.values()].map((raw) => {
-        const normalized = normalizeTask(raw, projectNames.get(raw.projectId) ?? raw.projectId);
+        const normalized = normalizeTask(raw, projectNames.get(raw.projectId) ?? raw.projectId, fallbackTimeZone);
         delete normalized.content;
         return normalized;
       });
       const generatedAt = (/* @__PURE__ */ new Date()).toISOString();
       const snapshot = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         selectedMonth,
         generatedAt,
         coverage: {
-          status: "complete",
+          status: failedCalls.length === 0 ? "complete" : "partial",
           selectedMonth,
           projectIds,
-          successfulCalls: ["project", "tag", ...projectIds.map((id) => `project/${id}/data`), "task/filter", "task/completed"],
-          failedCalls: [],
+          successfulCalls,
+          failedCalls,
           openTaskCount: tasks.filter((task) => task.status === "open").length,
-          completedTaskCount: tasks.filter((task) => task.status === "completed").length
+          completedTaskCount: tasks.filter((task) => task.status === "completed").length,
+          unknownTaskCount: tasks.filter((task) => task.status === "unknown").length
         },
         tasks
       };
       this.store.accept(snapshot);
       return snapshot;
     } catch (error) {
-      const result = error instanceof TickTickHttpError ? error.kind : "network";
+      const kind = error instanceof TickTickHttpError ? error.kind : "network";
+      const result = kind === "auth" || kind === "rate-limit" || kind === "server" || kind === "contract" ? kind : "network";
       this.store.recordFailure(selectedMonth, result, error instanceof Error ? error.message : "unknown");
       throw error;
     }
+  }
+  unwrap(result, call, successfulCalls, failedCalls) {
+    if (result.status === "fulfilled") {
+      successfulCalls.push(call);
+      return result.value;
+    }
+    failedCalls.push({ call, reason: failureReason(result.reason) });
+    return [];
   }
 };
 
@@ -602,20 +808,49 @@ var TaskCompletionService = class {
     this.api = api;
     this.synchronizer = synchronizer;
   }
-  inFlight = /* @__PURE__ */ new Map();
-  completeAndRefresh(month, task) {
-    if (task.status !== "open") return Promise.resolve();
-    const key2 = `${task.projectId}:${task.id}`;
-    const existing = this.inFlight.get(key2);
-    if (existing) return existing;
-    const operation = this.run(month, task).finally(() => {
-      if (this.inFlight.get(key2) === operation) this.inFlight.delete(key2);
-    });
-    this.inFlight.set(key2, operation);
-    return operation;
+  async preflight(task) {
+    let live;
+    try {
+      live = await this.api.getTask(task.projectId, task.id);
+    } catch (error) {
+      if (error instanceof TickTickHttpError && error.kind === "not-found") return { status: "not-found" };
+      throw error;
+    }
+    if (live.status !== "open") return { status: "already-completed", live };
+    const changed = live.title !== task.title || live.projectId !== task.projectId;
+    return { status: "ready", live, changed };
   }
-  async run(month, task) {
-    await this.api.completeTask(task.projectId, task.id);
+  async complete(month, task) {
+    try {
+      await this.api.completeTask(task.projectId, task.id);
+    } catch (error) {
+      if (error instanceof TickTickHttpError && error.kind === "unknown-outcome") return { status: "unknown" };
+      throw error;
+    }
+    let verifiedStillOpen = false;
+    try {
+      const live = await this.api.getTask(task.projectId, task.id);
+      verifiedStillOpen = live.status === "open";
+    } catch {
+    }
+    await this.refresh(month);
+    return verifiedStillOpen ? { status: "completed-unverified" } : { status: "completed" };
+  }
+  async confirmOutcome(month, task) {
+    let live;
+    try {
+      live = await this.api.getTask(task.projectId, task.id);
+    } catch (error) {
+      if (error instanceof TickTickHttpError && error.kind === "not-found") return { status: "not-found" };
+      throw error;
+    }
+    if (live.status !== "open") {
+      await this.refresh(month);
+      return { status: "completed" };
+    }
+    return { status: "still-open" };
+  }
+  async refresh(month) {
     try {
       await this.synchronizer.sync(month);
     } catch (error) {
@@ -724,12 +959,15 @@ function updateManagedFrontmatter(frontmatter, task, meta) {
 
 // src/notes/obsidian-task-note-port.ts
 var ObsidianTaskNotePort = class {
-  constructor(app) {
+  constructor(app, rootFolder = "40. Projects", taskNotesSubfolder = "TickTick Notes") {
     this.app = app;
+    this.rootFolder = rootFolder;
+    this.taskNotesSubfolder = taskNotesSubfolder;
   }
   async listTaskNotes() {
     const notes = [];
-    const candidates = this.app.vault.getMarkdownFiles().filter((file) => file.path.includes("/TickTick Notes/"));
+    const marker = `/${this.taskNotesSubfolder}/`;
+    const candidates = this.app.vault.getMarkdownFiles().filter((file) => file.path.includes(marker));
     for (const file of candidates) {
       const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
       if (frontmatter?.type === "ticktick-task-note" && typeof frontmatter.ticktickId === "string") {
@@ -749,7 +987,7 @@ var ObsidianTaskNotePort = class {
     return notes;
   }
   async listProjectFolders() {
-    const projects = this.app.vault.getFolderByPath("40. Projects");
+    const projects = this.app.vault.getFolderByPath(this.rootFolder);
     if (!projects) return [];
     return projects.children.filter((child) => child instanceof import_obsidian.TFolder).map((folder) => folder.name);
   }
@@ -778,48 +1016,6 @@ var ObsidianTaskNotePort = class {
   }
 };
 
-// src/notes/project-mapper.ts
-function key(value) {
-  return value.normalize("NFKC").trim().toUpperCase();
-}
-function equivalentKeys(value) {
-  const normalized = key(value);
-  const candidates = /* @__PURE__ */ new Set([normalized]);
-  const uni = /^UNI(.+)$/.exec(normalized);
-  if (uni?.[1]) {
-    candidates.add(`U${uni[1]}`);
-    candidates.add(uni[1]);
-  }
-  const shortU = /^U(.+)$/.exec(normalized);
-  if (shortU?.[1]) {
-    candidates.add(`UNI${shortU[1]}`);
-    candidates.add(shortU[1]);
-  }
-  if (!normalized.startsWith("U")) {
-    candidates.add(`U${normalized}`);
-    candidates.add(`UNI${normalized}`);
-  }
-  if (normalized === "UNIOS8K" || normalized === "UOS8K" || normalized === "OS8K") {
-    candidates.add("UNIOS8K");
-    candidates.add("UOS8K");
-    candidates.add("OS8K");
-  }
-  return candidates;
-}
-function resolveCanonicalProject(projectName, canonicalFolders, explicitAliases) {
-  const folders = new Map(canonicalFolders.map((folder) => [key(folder), folder]));
-  const direct = folders.get(key(projectName));
-  if (direct) return direct;
-  const aliasTarget = Object.entries(explicitAliases).find(([alias]) => key(alias) === key(projectName))?.[1];
-  if (aliasTarget) return folders.get(key(aliasTarget)) ?? null;
-  const inputKeys = equivalentKeys(projectName);
-  const matches = canonicalFolders.filter((folder) => {
-    const folderKeys = equivalentKeys(folder);
-    return [...inputKeys].some((candidate) => folderKeys.has(candidate));
-  });
-  return matches.length === 1 ? matches[0] ?? null : null;
-}
-
 // src/notes/task-note-repository.ts
 function resolveTaskProject(task, folders, aliases2) {
   const direct = resolveCanonicalProject(task.projectName, folders, aliases2);
@@ -830,10 +1026,12 @@ function resolveTaskProject(task, folders, aliases2) {
   }
   return tagMatches.values().next().value ?? null;
 }
+var DEFAULT_LAYOUT = { rootFolder: "40. Projects", taskNotesSubfolder: "TickTick Notes" };
 var TaskNoteRepository = class {
-  constructor(port, projectAliases) {
+  constructor(port, projectAliases, layout = DEFAULT_LAYOUT) {
     this.port = port;
     this.projectAliases = projectAliases;
+    this.layout = layout;
   }
   inFlight = /* @__PURE__ */ new Map();
   async openOrCreate(task, meta, newPane) {
@@ -862,7 +1060,7 @@ var TaskNoteRepository = class {
     if (!canonicalProject) {
       throw new Error(`Project mapping not found: ${task.projectName}; tags: ${task.tags.join(", ") || "(none)"}`);
     }
-    const folder = `40. Projects/${canonicalProject}/TickTick Notes`;
+    const folder = `${this.layout.rootFolder}/${canonicalProject}/${this.layout.taskNotesSubfolder}`;
     await this.port.ensureFolder(folder);
     const path = `${folder}/${taskNoteFileName(task)}`;
     try {
@@ -884,7 +1082,11 @@ var DEFAULT_SETTINGS = {
   excludeTags: [],
   showUntagged: true,
   projectAliases: {},
-  projectsBasePath: "90. Settings/Bases/Projects.base"
+  projectsBasePath: "90. Settings/Bases/Projects.base",
+  projectsRootFolder: "40. Projects",
+  taskNotesSubfolder: "TickTick Notes",
+  hubNoteType: "project-hub",
+  completionTtlMinutes: 30
 };
 function validSecretId(value) {
   return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value);
@@ -914,7 +1116,11 @@ function loadSettings(raw) {
     excludeTags: stringArray2(value.excludeTags),
     showUntagged: Object.prototype.hasOwnProperty.call(value, "showUntagged") ? value.showUntagged === true : DEFAULT_SETTINGS.showUntagged,
     projectAliases: aliases(value.projectAliases),
-    projectsBasePath: typeof value.projectsBasePath === "string" && value.projectsBasePath.trim() ? value.projectsBasePath.trim() : DEFAULT_SETTINGS.projectsBasePath
+    projectsBasePath: typeof value.projectsBasePath === "string" && value.projectsBasePath.trim() ? value.projectsBasePath.trim() : DEFAULT_SETTINGS.projectsBasePath,
+    projectsRootFolder: typeof value.projectsRootFolder === "string" && value.projectsRootFolder.trim() ? value.projectsRootFolder.trim().replace(/\/+$/, "") : DEFAULT_SETTINGS.projectsRootFolder,
+    taskNotesSubfolder: typeof value.taskNotesSubfolder === "string" && value.taskNotesSubfolder.trim() ? value.taskNotesSubfolder.trim().replace(/^\/+|\/+$/g, "") : DEFAULT_SETTINGS.taskNotesSubfolder,
+    hubNoteType: typeof value.hubNoteType === "string" && value.hubNoteType.trim() ? value.hubNoteType.trim() : DEFAULT_SETTINGS.hubNoteType,
+    completionTtlMinutes: typeof value.completionTtlMinutes === "number" && Number.isFinite(value.completionTtlMinutes) && value.completionTtlMinutes > 0 ? value.completionTtlMinutes : DEFAULT_SETTINGS.completionTtlMinutes
   };
 }
 
@@ -934,7 +1140,7 @@ var TickTickTagProgressSettingTab = class extends import_obsidian2.PluginSetting
     containerEl.createEl("h2", { text: "TickTick \uD0DC\uADF8 \uC9C4\uD589\uB960" });
     containerEl.createEl("p", {
       cls: "setting-item-description",
-      text: "\uACF5\uC2DD Open API v1\uC744 \uC77D\uAE30 \uC804\uC6A9\uC73C\uB85C \uC0AC\uC6A9\uD569\uB2C8\uB2E4. \uD1A0\uD070 \uAC12\uC740 SecretStorage\uC5D0\uB9CC \uBCF4\uAD00\uB429\uB2C8\uB2E4."
+      text: "\uACF5\uC2DD Open API v1\uC744 \uC870\uD68C + \uC0AC\uC6A9\uC790 \uD655\uC778\uD615 \uC644\uB8CC \uC4F0\uAE30(\uD0DC\uC2A4\uD06C \uC644\uB8CC 1\uC885)\uB85C \uC0AC\uC6A9\uD569\uB2C8\uB2E4. \uD1A0\uD070 \uAC12\uC740 SecretStorage\uC5D0\uB9CC \uBCF4\uAD00\uB429\uB2C8\uB2E4."
     });
     const hasToken = Boolean(this.app.secretStorage.getSecret(this.plugin.settings.secretName));
     let pendingToken = "";
@@ -956,7 +1162,7 @@ var TickTickTagProgressSettingTab = class extends import_obsidian2.PluginSetting
     }));
     new import_obsidian2.Setting(containerEl).setName("\uD1A0\uD070 \uC800\uC7A5 \uC0C1\uD0DC").setDesc(hasToken ? `\uC800\uC7A5\uB428 \xB7 SecretStorage ID: ${this.plugin.settings.secretName}` : "\uBBF8\uC124\uC815 \xB7 TickTick \uACC4\uC815\uC758 API Token\uC744 \uBC1C\uAE09\uBC1B\uC544 \uC704 \uC785\uB825\uB780\uC5D0 \uC800\uC7A5\uD558\uC138\uC694.");
     new import_obsidian2.Setting(containerEl).setName("\uC5F0\uACB0 \uD655\uC778").setDesc("\uD1A0\uD070\uC744 \uB85C\uADF8\uC5D0 \uB0A8\uAE30\uC9C0 \uC54A\uACE0 \uD504\uB85C\uC81D\uD2B8 \uBAA9\uB85D \uC77D\uAE30\uB9CC \uC2DC\uD5D8\uD569\uB2C8\uB2E4.").addButton((button2) => button2.setButtonText("\uACF5\uC2DD API \uD655\uC778").onClick(async () => this.plugin.testConnection()));
-    new import_obsidian2.Setting(containerEl).setName("\uD3EC\uD568 \uD0DC\uADF8").setDesc("\uC27C\uD45C\uB85C \uAD6C\uBD84\uD569\uB2C8\uB2E4. \uBE44\uC6CC \uB450\uBA74 \uBAA8\uB4E0 \uD0DC\uADF8\uB97C \uD45C\uC2DC\uD569\uB2C8\uB2E4.").addText((text) => text.setPlaceholder("UNIOS8K, UNI610H").setValue(this.plugin.settings.includeTags.join(", ")).onChange(async (value) => {
+    new import_obsidian2.Setting(containerEl).setName("\uD3EC\uD568 \uD0DC\uADF8").setDesc("\uC27C\uD45C\uB85C \uAD6C\uBD84\uD569\uB2C8\uB2E4. \uC785\uB825\uD55C \uC21C\uC11C\uAC00 \uB300\uC2DC\uBCF4\uB4DC \uD45C\uC2DC \uC21C\uC11C\uAC00 \uB429\uB2C8\uB2E4. \uBE44\uC6CC \uB450\uBA74 \uBAA8\uB4E0 \uD0DC\uADF8\uB97C \uD45C\uC2DC\uD569\uB2C8\uB2E4. TickTick \uC2E4\uC81C \uD0DC\uADF8 \uD45C\uAE30(\uC18C\uBB38\uC790)\uB97C \uC501\uB2C8\uB2E4.").addText((text) => text.setPlaceholder("uos8k, u610h").setValue(this.plugin.settings.includeTags.join(", ")).onChange(async (value) => {
       this.plugin.settings.includeTags = csv(value);
       await this.plugin.savePluginData();
       this.plugin.refreshViews();
@@ -971,8 +1177,28 @@ var TickTickTagProgressSettingTab = class extends import_obsidian2.PluginSetting
       await this.plugin.savePluginData();
       this.plugin.refreshViews();
     }));
+    new import_obsidian2.Setting(containerEl).setName("\uC644\uB8CC \uCC98\uB9AC \uD5C8\uC6A9 \uC2DC\uAC04(\uBD84)").setDesc("\uB9C8\uC9C0\uB9C9 \uB3D9\uAE30\uD654\uAC00 \uC774 \uC2DC\uAC04\uC744 \uB118\uC73C\uBA74 \uC644\uB8CC \uBC84\uD2BC\uC774 \uC624\uB798\uB41C \uB370\uC774\uD130\uB85C \uB3D9\uC791\uD558\uC9C0 \uC54A\uB3C4\uB85D \uB9C9\uC2B5\uB2C8\uB2E4. \uAE30\uBCF8 30\uBD84.").addText((text) => text.setValue(String(this.plugin.settings.completionTtlMinutes)).onChange(async (value) => {
+      const minutes = Number(value.trim());
+      if (Number.isFinite(minutes) && minutes > 0) {
+        this.plugin.settings.completionTtlMinutes = minutes;
+        await this.plugin.savePluginData();
+      }
+    }));
     new import_obsidian2.Setting(containerEl).setName("Projects.base \uACBD\uB85C").setDesc("\uC0DD\uC131\uB41C \uB85C\uCEEC \uB178\uD2B8\uB97C \uC5EC\uB294 \uAE30\uC874 Base\uC785\uB2C8\uB2E4. \uC0C8 Base\uB294 \uB9CC\uB4E4\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.").addText((text) => text.setValue(this.plugin.settings.projectsBasePath).onChange(async (value) => {
       this.plugin.settings.projectsBasePath = value.trim();
+      await this.plugin.savePluginData();
+    }));
+    new import_obsidian2.Setting(containerEl).setName("\uD504\uB85C\uC81D\uD2B8 \uB8E8\uD2B8 \uD3F4\uB354").setDesc("\uD0DC\uC2A4\uD06C \uB178\uD2B8\uB97C \uB9CC\uB4E4 \uB54C \uD504\uB85C\uC81D\uD2B8 \uD3F4\uB354\uB97C \uCC3E\uB294 \uC0C1\uC704 \uD3F4\uB354\uC785\uB2C8\uB2E4. \uAE30\uBCF8 \u201C40. Projects\u201D.").addText((text) => text.setValue(this.plugin.settings.projectsRootFolder).onChange(async (value) => {
+      this.plugin.settings.projectsRootFolder = value.trim().replace(/\/+$/, "") || this.plugin.settings.projectsRootFolder;
+      await this.plugin.savePluginData();
+    }));
+    new import_obsidian2.Setting(containerEl).setName("Project Hub \uB178\uD2B8 \uD0C0\uC785").setDesc("\uD0DC\uADF8 \uD589\uC758 \u201CHub\u201D \uB9C1\uD06C\uAC00 \uCC3E\uC744 \uB178\uD2B8\uC758 frontmatter type \uAC12\uC785\uB2C8\uB2E4. project \uD544\uB4DC\uAC00 \uD504\uB85C\uC81D\uD2B8\uC640 \uC77C\uCE58\uD558\uB294 \uB178\uD2B8\uB97C \uC5FD\uB2C8\uB2E4. \uAE30\uBCF8 \u201Cproject-hub\u201D.").addText((text) => text.setValue(this.plugin.settings.hubNoteType).onChange(async (value) => {
+      this.plugin.settings.hubNoteType = value.trim() || this.plugin.settings.hubNoteType;
+      await this.plugin.savePluginData();
+      this.plugin.refreshViews();
+    }));
+    new import_obsidian2.Setting(containerEl).setName("\uD0DC\uC2A4\uD06C \uB178\uD2B8 \uD558\uC704 \uD3F4\uB354").setDesc("\uAC01 \uD504\uB85C\uC81D\uD2B8 \uD3F4\uB354 \uC548\uC5D0\uC11C TickTick \uB178\uD2B8\uB97C \uBAA8\uC73C\uB294 \uD558\uC704 \uD3F4\uB354\uBA85\uC785\uB2C8\uB2E4. \uAE30\uBCF8 \u201CTickTick Notes\u201D.").addText((text) => text.setValue(this.plugin.settings.taskNotesSubfolder).onChange(async (value) => {
+      this.plugin.settings.taskNotesSubfolder = value.trim().replace(/^\/+|\/+$/g, "") || this.plugin.settings.taskNotesSubfolder;
       await this.plugin.savePluginData();
     }));
     new import_obsidian2.Setting(containerEl).setName("Bases \uBDF0 \uC5F0\uACB0").setDesc("\uAE30\uC874 Projects.base\uC5D0 TickTick Task Notes \uBDF0\uAC00 \uC5C6\uC744 \uB54C\uB9CC \uC548\uC804\uD558\uAC8C \uCD94\uAC00\uD569\uB2C8\uB2E4.").addButton((button2) => button2.setButtonText("\uC5F0\uACB0 \uD655\uC778/\uCD94\uAC00").onClick(async () => this.plugin.ensureProjectsBase()));
@@ -983,6 +1209,27 @@ var TickTickTagProgressSettingTab = class extends import_obsidian2.PluginSetting
 var import_obsidian3 = require("obsidian");
 
 // src/ui/dashboard-renderer.ts
+var STAGNATION_DAYS = 7;
+function todayLocalDate() {
+  return new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit" }).format(/* @__PURE__ */ new Date());
+}
+function compareByDue(a, b) {
+  const ad = a.localDueDate;
+  const bd = b.localDueDate;
+  if (ad !== bd) {
+    if (ad === void 0) return 1;
+    if (bd === void 0) return -1;
+    return ad < bd ? -1 : 1;
+  }
+  const rank = (task) => task.status === "open" ? 0 : 1;
+  return rank(a) - rank(b);
+}
+function daysSince(iso, now = Date.now()) {
+  if (!iso) return null;
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return null;
+  return Math.max(0, Math.floor((now - then) / 864e5));
+}
 function element(tag, className, text) {
   const el = document.createElement(tag);
   if (className) el.className = className;
@@ -1009,7 +1256,14 @@ function renderToolbar(root, model, actions) {
   next.addEventListener("click", () => actions.onMonthChange(1));
   monthNav.append(prev, month, next);
   const meta = element("div", "ttgp-toolbar-meta");
-  const status = element("span", `ttgp-status ttgp-status--${model.status}`, model.status === "complete" ? "\uC804\uCCB4 \uC870\uD68C" : model.status);
+  const statusLabels = {
+    complete: "\uC804\uCCB4 \uC870\uD68C",
+    partial: "\uBD80\uBD84 \uC870\uD68C",
+    stale: "\uC624\uB798\uB428",
+    syncing: "\uB3D9\uAE30\uD654 \uC911",
+    empty: "\uB370\uC774\uD130 \uC5C6\uC74C"
+  };
+  const status = element("span", `ttgp-status ttgp-status--${model.status}`, statusLabels[model.status] ?? model.status);
   const count = element("span", "ttgp-count", `\uC77C\uC815 \uD0DC\uC2A4\uD06C ${model.uniqueTaskCount}`);
   const synced = element("span", "ttgp-last-sync", model.lastSuccessAt ? `\uB9C8\uC9C0\uB9C9 \uC131\uACF5 ${new Date(model.lastSuccessAt).toLocaleString("ko-KR")}` : "\uB3D9\uAE30\uD654 \uAE30\uB85D \uC5C6\uC74C");
   meta.append(status, count, synced);
@@ -1020,11 +1274,43 @@ function renderToolbar(root, model, actions) {
   toolbar.append(monthNav, meta, sync);
   root.append(toolbar);
 }
+function formatAge(ageMs) {
+  if (!Number.isFinite(ageMs) || ageMs < 0) return "\uC2DC\uAC01 \uBD88\uBA85";
+  const minutes = Math.floor(ageMs / 6e4);
+  if (minutes < 1) return "\uBC29\uAE08 \uC804";
+  if (minutes < 60) return `${minutes}\uBD84 \uC804`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}\uC2DC\uAC04 \uC804`;
+  return `${Math.floor(hours / 24)}\uC77C \uC804`;
+}
+function renderSummary(root, summary) {
+  const strip = element("section", "ttgp-summary");
+  strip.setAttribute("aria-label", "\uC6D4\uAC04 \uC694\uC57D");
+  const metric = (label, value, extraClass) => {
+    const item = element("span", `ttgp-summary-item${extraClass ? ` ${extraClass}` : ""}`);
+    item.append(element("strong", "ttgp-summary-value", value), element("span", "ttgp-summary-label", label));
+    return item;
+  };
+  strip.append(
+    metric("\uD65C\uC131 \uD504\uB85C\uC81D\uD2B8", String(summary.activeProjectCount)),
+    metric("\uD0DC\uC2A4\uD06C", `${summary.taskCompleted}/${summary.taskTotal}`),
+    metric("\uBBF8\uBD84\uB958", String(summary.untaggedCount), summary.untaggedCount > 0 ? "is-flagged" : void 0),
+    metric("\uAE30\uAC04 \uBBF8\uC9C0\uC815", String(summary.unscheduledCount), summary.unscheduledCount > 0 ? "is-flagged" : void 0)
+  );
+  if (summary.unknownStatusCount > 0) {
+    strip.append(metric("\uC0C1\uD0DC \uBBF8\uD655\uC815", String(summary.unknownStatusCount), "is-warning"));
+  }
+  const freshness = element("span", `ttgp-summary-freshness${summary.stale ? " is-stale" : ""}`);
+  freshness.append(element("span", "ttgp-summary-label", "\uB370\uC774\uD130"), element("strong", "ttgp-summary-value", formatAge(summary.snapshotAgeMs)));
+  if (summary.stale) freshness.append(element("span", "ttgp-summary-badge", "\uB3D9\uAE30\uD654 \uD544\uC694"));
+  strip.append(freshness);
+  root.append(strip);
+}
 function renderHeader(root, month) {
   const header = element("div", "ttgp-grid-header");
   const tag = element("div", "ttgp-heading ttgp-heading--tag", "\uD0DC\uADF8");
   tag.dataset.column = "tag";
-  const progress = element("div", "ttgp-heading ttgp-heading--progress", "\uC9C4\uD589\uB960");
+  const progress = element("div", "ttgp-heading ttgp-heading--progress", "\uD0DC\uC2A4\uD06C \uC644\uB8CC\uC728");
   progress.dataset.column = "progress";
   const timeline = element("div", "ttgp-timeline-header");
   timeline.dataset.column = "timeline";
@@ -1041,9 +1327,10 @@ function renderHeader(root, month) {
 function renderRows(root, model, actions) {
   const rows = element("div", "ttgp-rows");
   const dayCount = daysInMonth(model.month);
-  for (const row of model.rows) {
+  for (const [index, row] of model.rows.entries()) {
     const selected = row.tagKey === model.selectedTagKey;
-    const rowEl = element("div", `ttgp-row${selected ? " is-selected" : ""}`);
+    const startsUntaggedGroup = row.tagKey === UNTAGGED_KEY && index > 0;
+    const rowEl = element("div", `ttgp-row${selected ? " is-selected" : ""}${startsUntaggedGroup ? " ttgp-row--untagged-group" : ""}`);
     rowEl.setAttribute("role", "button");
     rowEl.tabIndex = 0;
     rowEl.setAttribute("aria-expanded", String(selected));
@@ -1059,8 +1346,24 @@ function renderRows(root, model, actions) {
     const tag = element("div", "ttgp-tag-cell");
     tag.append(element("span", "ttgp-tag-mark"), element("strong", "ttgp-tag-name", row.displayName));
     if (row.unscheduledCount > 0) tag.append(element("span", "ttgp-unscheduled", `+${row.unscheduledCount} \uAE30\uAC04 \uBBF8\uC9C0\uC815`));
+    const hubPath = model.hubPathsByTag?.[row.tagKey];
+    if (hubPath) {
+      const hub = button("Hub", `${row.displayName} Project Hub \uC5F4\uAE30`);
+      hub.classList.add("ttgp-hub-link");
+      hub.addEventListener("click", (event) => {
+        event.stopPropagation();
+        actions.onOpenHub(row.tagKey);
+      });
+      tag.append(hub);
+    }
     const progress = element("div", "ttgp-progress-cell");
     progress.append(element("strong", "ttgp-fraction", `${row.completed}/${row.total}`), element("span", "ttgp-percent", `${row.percent}%`));
+    if (row.total > 0) {
+      const days = daysSince(row.lastCompletedAt);
+      const stagnation = element("span", "ttgp-last-completed", days === null ? "\uC774\uBC88 \uB2EC \uC644\uB8CC \uC5C6\uC74C" : `\uB9C8\uC9C0\uB9C9 \uC644\uB8CC ${days}\uC77C \uC804`);
+      if (days !== null && days >= STAGNATION_DAYS) stagnation.classList.add("is-stale");
+      progress.append(stagnation);
+    }
     const timeline = element("div", "ttgp-timeline-cell");
     timeline.style.setProperty("--tt-days", String(dayCount));
     if (row.total === 0 || row.visibleStartDay === void 0 || row.visibleEndDay === void 0) {
@@ -1086,7 +1389,8 @@ function renderDrilldown(root, model, actions) {
   const selectedRow = model.rows.find((row) => row.tagKey === model.selectedTagKey);
   if (!selectedRow) return;
   const taskIds = new Set(selectedRow.taskIds);
-  const tasks = model.tasks.filter((task) => taskIds.has(task.id));
+  const today = todayLocalDate();
+  const tasks = model.tasks.filter((task) => taskIds.has(task.id)).sort(compareByDue);
   const panel = element("section", "ttgp-drilldown");
   const header = element("div", "ttgp-drilldown-header");
   const title = element("div");
@@ -1111,7 +1415,15 @@ function renderDrilldown(root, model, actions) {
     detail.type = "button";
     detail.setAttribute("aria-label", `${task.title} \uB178\uD2B8 \uC0DD\uC131 \uB610\uB294 \uC5F4\uAE30`);
     detail.title = "\uD0DC\uC2A4\uD06C \uB178\uD2B8 \uC0DD\uC131 \uB610\uB294 \uC5F4\uAE30";
-    detail.append(element("strong", void 0, task.title), element("span", void 0, task.dueAt?.slice(0, 10) ?? "\uAE30\uAC04 \uBBF8\uC9C0\uC815"));
+    const overdue = task.status === "open" && task.localDueDate !== void 0 && task.localDueDate < today;
+    const meta = element("span", "ttgp-task-due");
+    if (overdue) {
+      meta.classList.add("is-overdue");
+      meta.append(element("span", "ttgp-overdue-badge", "\uC9C0\uC5F0"), element("span", void 0, task.localDueDate));
+    } else {
+      meta.textContent = task.localDueDate ?? "\uAE30\uAC04 \uBBF8\uC9C0\uC815";
+    }
+    detail.append(element("strong", void 0, task.title), meta);
     detail.addEventListener("click", (event) => actions.onOpenTask(task.id, event.ctrlKey || event.metaKey));
     item.append(state, detail);
     list.append(item);
@@ -1123,6 +1435,7 @@ function renderDashboard(root, model, actions) {
   root.replaceChildren();
   root.classList.add("ttgp-dashboard");
   renderToolbar(root, model, actions);
+  if (model.summary) renderSummary(root, model.summary);
   if (model.status === "empty" && model.rows.length === 0) {
     root.append(element("div", "ttgp-empty", "\uC774 \uC6D4 \uB370\uC774\uD130\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4. \uB3D9\uAE30\uD654\uB97C \uC2E4\uD589\uD558\uC138\uC694."));
     return;
@@ -1187,6 +1500,9 @@ var GanttDashboardView = class extends import_obsidian3.ItemView {
       },
       onOpenBases: (tagKey) => {
         void this.plugin.openProjectsBase(tagKey);
+      },
+      onOpenHub: (tagKey) => {
+        void this.plugin.openProjectHub(tagKey);
       }
     });
   }
@@ -1195,11 +1511,14 @@ var GanttDashboardView = class extends import_obsidian3.ItemView {
 // src/ui/task-completion-modal.ts
 var import_obsidian4 = require("obsidian");
 var TaskCompletionModal = class extends import_obsidian4.Modal {
-  constructor(app, task, onConfirm) {
+  constructor(app, task, handlers) {
     super(app);
     this.task = task;
-    this.onConfirm = onConfirm;
+    this.handlers = handlers;
   }
+  error;
+  note;
+  controls;
   onOpen() {
     this.setTitle("TickTick \uC644\uB8CC \uCC98\uB9AC \uD655\uC778");
     this.modalEl.addClass("ttgp-completion-modal");
@@ -1212,37 +1531,95 @@ var TaskCompletionModal = class extends import_obsidian4.Modal {
     this.addPreviewRow(preview, "\uD0DC\uC2A4\uD06C", this.task.title);
     this.addPreviewRow(preview, "\uD504\uB85C\uC81D\uD2B8", this.task.projectName);
     this.addPreviewRow(preview, "\uBCC0\uACBD", "\uBBF8\uC644\uB8CC \u2192 \uC644\uB8CC");
-    const note = document.createElement("p");
-    note.className = "ttgp-completion-note";
-    note.textContent = "\uC644\uB8CC \uCC98\uB9AC \uD6C4 \uD604\uC7AC \uC6D4 \uB370\uC774\uD130\uB97C \uB2E4\uC2DC \uB3D9\uAE30\uD654\uD569\uB2C8\uB2E4.";
-    const error = document.createElement("p");
-    error.className = "ttgp-completion-error";
-    error.setAttribute("role", "alert");
-    error.hidden = true;
-    const controls = document.createElement("div");
-    controls.className = "ttgp-completion-actions";
-    const cancel = new import_obsidian4.ButtonComponent(controls).setButtonText("\uCDE8\uC18C").onClick(() => this.close());
-    const confirm = new import_obsidian4.ButtonComponent(controls).setButtonText("TickTick\uC5D0\uC11C \uC644\uB8CC \uCC98\uB9AC").setCta().onClick(() => {
-      void submit();
-    });
-    const submit = async () => {
-      cancel.setDisabled(true);
-      confirm.setDisabled(true).setButtonText("\uC644\uB8CC \uCC98\uB9AC \uC911\u2026");
-      error.hidden = true;
-      try {
-        await this.onConfirm();
-        this.close();
-      } catch (reason) {
-        error.textContent = reason instanceof Error ? reason.message : "\uC644\uB8CC \uCC98\uB9AC\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.";
-        error.hidden = false;
-        cancel.setDisabled(false);
-        confirm.setDisabled(false).setButtonText("\uB2E4\uC2DC \uC2DC\uB3C4");
-      }
-    };
-    this.contentEl.append(intro, preview, note, error, controls);
+    if (this.task.changed) {
+      const changed = document.createElement("p");
+      changed.className = "ttgp-completion-changed";
+      changed.setAttribute("role", "alert");
+      changed.textContent = "\uC774 \uD0DC\uC2A4\uD06C\uC758 \uC81C\uBAA9 \uB610\uB294 \uD504\uB85C\uC81D\uD2B8\uAC00 \uB9C8\uC9C0\uB9C9 \uB3D9\uAE30\uD654 \uC774\uD6C4 \uBC14\uB00C\uC5C8\uC2B5\uB2C8\uB2E4. \uC704 \uCD5C\uC2E0 \uAC12\uC744 \uD655\uC778\uD558\uACE0 \uC9C4\uD589\uD558\uC138\uC694.";
+      this.contentEl.append(changed);
+    }
+    this.note = document.createElement("p");
+    this.note.className = "ttgp-completion-note";
+    this.note.textContent = "\uC644\uB8CC \uCC98\uB9AC \uC9C1\uC804\uACFC \uC9C1\uD6C4\uC5D0 TickTick \uC6D0\uBCF8 \uC0C1\uD0DC\uB97C \uB2E4\uC2DC \uD655\uC778\uD569\uB2C8\uB2E4.";
+    this.error = document.createElement("p");
+    this.error.className = "ttgp-completion-error";
+    this.error.setAttribute("role", "alert");
+    this.error.hidden = true;
+    this.controls = document.createElement("div");
+    this.controls.className = "ttgp-completion-actions";
+    this.contentEl.append(intro, preview, this.note, this.error, this.controls);
+    this.renderConfirmControls();
   }
   onClose() {
     this.contentEl.replaceChildren();
+  }
+  renderConfirmControls() {
+    this.controls.replaceChildren();
+    const cancel = new import_obsidian4.ButtonComponent(this.controls).setButtonText("\uCDE8\uC18C").onClick(() => this.close());
+    const confirm = new import_obsidian4.ButtonComponent(this.controls).setButtonText("TickTick\uC5D0\uC11C \uC644\uB8CC \uCC98\uB9AC").setCta().onClick(() => {
+      void run();
+    });
+    const run = async () => {
+      cancel.setDisabled(true);
+      confirm.setDisabled(true).setButtonText("\uC644\uB8CC \uCC98\uB9AC \uC911\u2026");
+      this.error.hidden = true;
+      let result;
+      try {
+        result = await this.handlers.onConfirm();
+      } catch (reason) {
+        this.showError(reason instanceof Error ? reason.message : "\uC644\uB8CC \uCC98\uB9AC\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.");
+        cancel.setDisabled(false);
+        confirm.setDisabled(false).setButtonText("\uB2E4\uC2DC \uC2DC\uB3C4");
+        return;
+      }
+      if (result.state === "completed") {
+        this.close();
+        return;
+      }
+      if (result.state === "unknown") {
+        this.renderUnknownState(result.message);
+        return;
+      }
+      this.showError(result.message);
+      cancel.setDisabled(false);
+      confirm.setDisabled(false).setButtonText("\uB2E4\uC2DC \uC2DC\uB3C4");
+    };
+  }
+  renderUnknownState(message) {
+    this.note.textContent = "\uC790\uB3D9 \uC7AC\uC2DC\uB3C4\uB97C \uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. TickTick \uBC18\uC601 \uC5EC\uBD80\uB97C \uD655\uC778\uD55C \uB4A4\uC5D0\uB9CC \uB2E4\uC2DC \uC2DC\uB3C4\uD558\uC138\uC694.";
+    this.showError(message);
+    this.controls.replaceChildren();
+    new import_obsidian4.ButtonComponent(this.controls).setButtonText("\uB2EB\uAE30").onClick(() => this.close());
+    const check = new import_obsidian4.ButtonComponent(this.controls).setButtonText("\uC0C1\uD0DC \uD655\uC778").setCta().onClick(() => {
+      void run();
+    });
+    const run = async () => {
+      check.setDisabled(true).setButtonText("\uD655\uC778 \uC911\u2026");
+      let result;
+      try {
+        result = await this.handlers.onConfirmOutcome();
+      } catch (reason) {
+        this.showError(reason instanceof Error ? reason.message : "\uC0C1\uD0DC \uD655\uC778\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.");
+        check.setDisabled(false).setButtonText("\uC0C1\uD0DC \uD655\uC778");
+        return;
+      }
+      if (result.state === "completed") {
+        this.close();
+        return;
+      }
+      if (result.state === "still-open") {
+        this.note.textContent = result.message;
+        this.error.hidden = true;
+        this.renderConfirmControls();
+        return;
+      }
+      this.showError(result.message);
+      check.setDisabled(false).setButtonText("\uC0C1\uD0DC \uD655\uC778");
+    };
+  }
+  showError(message) {
+    this.error.textContent = message;
+    this.error.hidden = false;
   }
   addPreviewRow(container, label, value) {
     const term = document.createElement("dt");
@@ -1281,8 +1658,21 @@ var TickTickTagProgressPlugin = class extends import_obsidian5.Plugin {
       transport
     );
     this.syncService = new SyncService(this.api, this.snapshotStore);
-    this.taskCompletion = new TaskCompletionService(this.api, this.syncService);
-    this.taskNotes = new TaskNoteRepository(new ObsidianTaskNotePort(this.app), this.settings.projectAliases);
+    this.taskCompletion = new TaskCompletionService(
+      {
+        getTask: async (projectId, taskId) => normalizeTask(
+          await this.api.getTask(projectId, taskId),
+          this.projectNameFor(projectId)
+        ),
+        completeTask: (projectId, taskId) => this.api.completeTask(projectId, taskId)
+      },
+      { sync: (month) => this.syncService.sync(month) }
+    );
+    this.taskNotes = new TaskNoteRepository(
+      new ObsidianTaskNotePort(this.app, this.settings.projectsRootFolder, this.settings.taskNotesSubfolder),
+      this.settings.projectAliases,
+      { rootFolder: this.settings.projectsRootFolder, taskNotesSubfolder: this.settings.taskNotesSubfolder }
+    );
     this.registerView(DASHBOARD_VIEW_TYPE, (leaf) => new GanttDashboardView(leaf, this));
     this.addRibbonIcon("chart-gantt", "TickTick \uD0DC\uADF8 \uC9C4\uD589\uB960", () => {
       void this.activateDashboard();
@@ -1321,6 +1711,43 @@ var TickTickTagProgressPlugin = class extends import_obsidian5.Plugin {
       if (leaf.view instanceof GanttDashboardView) leaf.view.render();
     }
   }
+  listProjectFolders() {
+    const root = this.app.vault.getFolderByPath((0, import_obsidian5.normalizePath)(this.settings.projectsRootFolder));
+    if (!(root instanceof import_obsidian5.TFolder)) return [];
+    return root.children.filter((child) => child instanceof import_obsidian5.TFolder).map((folder) => folder.name);
+  }
+  // Canonical project folder -> its Project Hub note path, only when exactly one
+  // hub claims that project. Ambiguous or missing hubs are omitted (fail-closed).
+  buildHubIndex(folders) {
+    const byCanonical = /* @__PURE__ */ new Map();
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+      if (!frontmatter || frontmatter.type !== this.settings.hubNoteType || typeof frontmatter.project !== "string") continue;
+      const canonical = resolveCanonicalProject(frontmatter.project, folders, this.settings.projectAliases);
+      if (!canonical) continue;
+      const paths = byCanonical.get(canonical) ?? [];
+      paths.push(file.path);
+      byCanonical.set(canonical, paths);
+    }
+    const index = /* @__PURE__ */ new Map();
+    for (const [canonical, paths] of byCanonical) if (paths.length === 1) index.set(canonical, paths[0]);
+    return index;
+  }
+  hubPathForTag(tagKey, folders, index) {
+    if (tagKey === UNTAGGED_KEY) return null;
+    const canonical = resolveCanonicalProject(tagKey, folders, this.settings.projectAliases);
+    return canonical ? index.get(canonical) ?? null : null;
+  }
+  async openProjectHub(tagKey) {
+    const folders = this.listProjectFolders();
+    const path = this.hubPathForTag(tagKey, folders, this.buildHubIndex(folders));
+    if (!path) {
+      new import_obsidian5.Notice("\uC5F0\uACB0\uB41C Project Hub\uB97C \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
+      return;
+    }
+    const file = this.app.vault.getFileByPath((0, import_obsidian5.normalizePath)(path));
+    if (file instanceof import_obsidian5.TFile) await this.app.workspace.getLeaf("tab").openFile(file);
+  }
   getDashboardModel(month, selectedTagKey) {
     const snapshot = this.snapshotStore.getLastGood(month);
     const lastAttempt = this.snapshotStore.getLastAttempt();
@@ -1337,19 +1764,42 @@ var TickTickTagProgressPlugin = class extends import_obsidian5.Plugin {
     }
     const include = new Set(this.settings.includeTags.map(normalizeTagKey));
     const exclude = new Set(this.settings.excludeTags.map(normalizeTagKey));
-    const rows = aggregateTagProgress(snapshot.tasks, month, { showUntagged: this.settings.showUntagged }).filter((row) => (include.size === 0 || include.has(row.tagKey)) && !exclude.has(row.tagKey));
+    const filteredRows = aggregateTagProgress(snapshot.tasks, month, { showUntagged: this.settings.showUntagged }).filter((row) => row.tagKey === UNTAGGED_KEY ? this.settings.showUntagged : (include.size === 0 || include.has(row.tagKey)) && !exclude.has(row.tagKey));
+    const rows = orderTagRows(filteredRows, this.settings.includeTags);
     const scheduled = snapshot.tasks.filter((task) => {
-      const start = task.startAt ?? task.dueAt;
-      const due = task.dueAt ?? task.startAt;
+      const start = task.localStartDate ?? task.localDueDate;
+      const due = task.localDueDate ?? task.localStartDate;
       return Boolean(start && due && clampTaskToMonth(start, due, month));
     });
     const failedAfterSnapshot = lastAttempt && lastAttempt.selectedMonth === month && lastAttempt.result !== "success" && lastAttempt.attemptedAt > snapshot.generatedAt;
+    const status = this.syncing ? "syncing" : failedAfterSnapshot ? "stale" : snapshot.coverage.status === "partial" ? "partial" : "complete";
+    const considered = snapshot.tasks.filter((task) => task.status === "open" || task.status === "completed");
+    const ageMs = Date.now() - Date.parse(snapshot.generatedAt);
+    const summary = {
+      activeProjectCount: snapshot.coverage.projectIds.length,
+      taskTotal: considered.length,
+      taskCompleted: considered.filter((task) => task.status === "completed").length,
+      untaggedCount: considered.filter((task) => task.tags.length === 0).length,
+      unscheduledCount: considered.filter((task) => !task.localStartDate && !task.localDueDate).length,
+      unknownStatusCount: snapshot.coverage.unknownTaskCount,
+      snapshotAgeMs: ageMs,
+      stale: !Number.isFinite(ageMs) || ageMs > this.settings.completionTtlMinutes * 6e4
+    };
+    const folders = this.listProjectFolders();
+    const hubIndex = this.buildHubIndex(folders);
+    const hubPathsByTag = {};
+    for (const row of rows) {
+      const path = this.hubPathForTag(row.tagKey, folders, hubIndex);
+      if (path) hubPathsByTag[row.tagKey] = path;
+    }
     return {
       month,
-      status: this.syncing ? "syncing" : failedAfterSnapshot ? "stale" : "complete",
+      status,
       lastSuccessAt: snapshot.generatedAt,
       uniqueTaskCount: new Set(scheduled.map((task) => task.id)).size,
       selectedTagKey,
+      summary,
+      hubPathsByTag,
       rows,
       tasks: snapshot.tasks
     };
@@ -1398,10 +1848,20 @@ var TickTickTagProgressPlugin = class extends import_obsidian5.Plugin {
       new import_obsidian5.Notice(error instanceof Error ? `\uD0DC\uC2A4\uD06C \uB178\uD2B8\uB97C \uC5F4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: ${error.message}` : "\uD0DC\uC2A4\uD06C \uB178\uD2B8\uB97C \uC5F4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.", 8e3);
     }
   }
+  projectNameFor(projectId) {
+    for (const snapshot of this.snapshotStore.listSnapshots()) {
+      const match = snapshot.tasks.find((task) => task.projectId === projectId);
+      if (match) return match.projectName;
+    }
+    return projectId;
+  }
   requestTaskCompletion(month, taskId) {
+    void this.beginTaskCompletion(month, taskId);
+  }
+  async beginTaskCompletion(month, taskId) {
     const snapshot = this.snapshotStore.getLastGood(month);
     const task = snapshot?.tasks.find((candidate) => candidate.id === taskId);
-    if (!task) {
+    if (!snapshot || !task) {
       new import_obsidian5.Notice("\uC120\uD0DD\uD55C \uD0DC\uC2A4\uD06C\uAC00 \uD604\uC7AC snapshot\uC5D0 \uC5C6\uC2B5\uB2C8\uB2E4. \uB2E4\uC2DC \uB3D9\uAE30\uD654\uD558\uC138\uC694.");
       return;
     }
@@ -1413,31 +1873,104 @@ var TickTickTagProgressPlugin = class extends import_obsidian5.Plugin {
       new import_obsidian5.Notice("\uD604\uC7AC \uB3D9\uAE30\uD654\uAC00 \uB05D\uB09C \uB4A4 \uB2E4\uC2DC \uC2DC\uB3C4\uD558\uC138\uC694.");
       return;
     }
-    new TaskCompletionModal(this.app, task, async () => {
-      await this.completeTaskAndRefresh(month, task);
-    }).open();
-  }
-  async completeTaskAndRefresh(month, task) {
-    if (this.syncing) throw new Error("\uD604\uC7AC \uB3D9\uAE30\uD654\uAC00 \uB05D\uB09C \uB4A4 \uB2E4\uC2DC \uC2DC\uB3C4\uD558\uC138\uC694.");
-    this.syncing = true;
-    this.refreshViews();
-    try {
-      await this.taskCompletion.completeAndRefresh(month, task);
-      await this.savePluginData();
-      new import_obsidian5.Notice(`\u201C${task.title}\u201D\uC744 TickTick\uC5D0\uC11C \uC644\uB8CC \uCC98\uB9AC\uD588\uC2B5\uB2C8\uB2E4.`);
-    } catch (error) {
-      await this.savePluginData();
-      if (error instanceof CompletionRefreshError) {
-        new import_obsidian5.Notice("TickTick \uC644\uB8CC \uCC98\uB9AC\uB294 \uC131\uACF5\uD588\uC9C0\uB9CC \uD654\uBA74 \uC7AC\uB3D9\uAE30\uD654\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4. \uB3D9\uAE30\uD654 \uBC84\uD2BC\uC744 \uB2E4\uC2DC \uB204\uB974\uC138\uC694.", 9e3);
-        return;
-      }
-      const message = error instanceof TickTickHttpError && error.kind === "auth" ? "TickTick \uC778\uC99D\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4. API \uD1A0\uD070\uC744 \uD655\uC778\uD558\uC138\uC694." : "TickTick \uC644\uB8CC \uCC98\uB9AC\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4. \uD0DC\uC2A4\uD06C\uB294 \uBCC0\uACBD\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.";
-      new import_obsidian5.Notice(message, 8e3);
-      throw new Error(message);
-    } finally {
-      this.syncing = false;
-      this.refreshViews();
+    if (snapshot.coverage.status !== "complete") {
+      new import_obsidian5.Notice("\uC870\uD68C \uBC94\uC704\uAC00 \uC81C\uD55C\uC801\uC785\uB2C8\uB2E4. \uB2E4\uC2DC \uB3D9\uAE30\uD654\uD55C \uB4A4 \uC644\uB8CC \uCC98\uB9AC\uD558\uC138\uC694.", 8e3);
+      return;
     }
+    const lastAttempt = this.snapshotStore.getLastAttempt();
+    if (lastAttempt && lastAttempt.selectedMonth === month && lastAttempt.result !== "success" && lastAttempt.attemptedAt > snapshot.generatedAt) {
+      new import_obsidian5.Notice("\uB9C8\uC9C0\uB9C9 \uB3D9\uAE30\uD654\uAC00 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4. \uB2E4\uC2DC \uB3D9\uAE30\uD654\uD55C \uB4A4 \uC644\uB8CC \uCC98\uB9AC\uD558\uC138\uC694.", 8e3);
+      return;
+    }
+    const ageMinutes = (Date.now() - Date.parse(snapshot.generatedAt)) / 6e4;
+    if (!Number.isFinite(ageMinutes) || ageMinutes > this.settings.completionTtlMinutes) {
+      new import_obsidian5.Notice(`\uB370\uC774\uD130\uAC00 \uC624\uB798\uB418\uC5C8\uC2B5\uB2C8\uB2E4. \uB2E4\uC2DC \uB3D9\uAE30\uD654\uD55C \uB4A4 \uC644\uB8CC \uCC98\uB9AC\uD558\uC138\uC694.`, 8e3);
+      return;
+    }
+    let preflight;
+    try {
+      preflight = await this.taskCompletion.preflight(task);
+    } catch (error) {
+      new import_obsidian5.Notice(this.completionErrorMessage(error), 8e3);
+      return;
+    }
+    if (preflight.status === "not-found") {
+      new import_obsidian5.Notice("\uD0DC\uC2A4\uD06C\uAC00 \uC0AD\uC81C\uB418\uC5C8\uAC70\uB098 \uC774\uB3D9\uB418\uC5C8\uC2B5\uB2C8\uB2E4. \uB2E4\uC2DC \uB3D9\uAE30\uD654\uD558\uC138\uC694.", 8e3);
+      return;
+    }
+    if (preflight.status === "already-completed") {
+      new import_obsidian5.Notice("\uC774\uBBF8 \uC644\uB8CC\uB41C \uD0DC\uC2A4\uD06C\uC785\uB2C8\uB2E4. \uB2E4\uC2DC \uB3D9\uAE30\uD654\uD558\uC138\uC694.");
+      return;
+    }
+    const live = preflight.live;
+    const target = { id: live.id, projectId: live.projectId, title: live.title, status: live.status };
+    new TaskCompletionModal(
+      this.app,
+      { title: live.title, projectName: live.projectName, changed: preflight.changed },
+      {
+        onConfirm: async () => {
+          this.syncing = true;
+          this.refreshViews();
+          try {
+            const result = await this.taskCompletion.complete(month, target);
+            if (result.status === "unknown") {
+              return { state: "unknown", message: "\uC644\uB8CC \uC694\uCCAD\uC774 \uC2DC\uAC04 \uCD08\uACFC\uB410\uC2B5\uB2C8\uB2E4. TickTick \uBC18\uC601 \uC5EC\uBD80\uAC00 \uD655\uC815\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4." };
+            }
+            await this.savePluginData();
+            if (result.status === "completed-unverified") {
+              new import_obsidian5.Notice(`\u201C${live.title}\u201D \uC644\uB8CC \uC694\uCCAD\uC740 \uC804\uC1A1\uD588\uC73C\uB098 \uBC18\uC601\uC744 \uD655\uC778\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uB3D9\uAE30\uD654\uB85C \uD655\uC778\uD558\uC138\uC694.`, 9e3);
+            } else {
+              new import_obsidian5.Notice(`\u201C${live.title}\u201D\uC744 TickTick\uC5D0\uC11C \uC644\uB8CC \uCC98\uB9AC\uD588\uC2B5\uB2C8\uB2E4.`);
+            }
+            return { state: "completed" };
+          } catch (error) {
+            if (error instanceof CompletionRefreshError) {
+              await this.savePluginData();
+              new import_obsidian5.Notice("TickTick \uC644\uB8CC \uCC98\uB9AC\uB294 \uC131\uACF5\uD588\uC9C0\uB9CC \uD654\uBA74 \uC7AC\uB3D9\uAE30\uD654\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4. \uB3D9\uAE30\uD654 \uBC84\uD2BC\uC744 \uB2E4\uC2DC \uB204\uB974\uC138\uC694.", 9e3);
+              return { state: "completed" };
+            }
+            return { state: "error", message: this.completionErrorMessage(error) };
+          } finally {
+            this.syncing = false;
+            this.refreshViews();
+          }
+        },
+        onConfirmOutcome: async () => {
+          this.syncing = true;
+          this.refreshViews();
+          try {
+            const outcome = await this.taskCompletion.confirmOutcome(month, target);
+            if (outcome.status === "completed") {
+              await this.savePluginData();
+              new import_obsidian5.Notice(`\u201C${live.title}\u201D\uC774 TickTick\uC5D0\uC11C \uC644\uB8CC\uB418\uC5B4 \uC788\uC5C8\uC2B5\uB2C8\uB2E4.`);
+              return { state: "completed" };
+            }
+            if (outcome.status === "not-found") {
+              return { state: "error", message: "\uD0DC\uC2A4\uD06C\uAC00 \uC0AD\uC81C\uB418\uC5C8\uAC70\uB098 \uC774\uB3D9\uB418\uC5C8\uC2B5\uB2C8\uB2E4. \uB2E4\uC2DC \uB3D9\uAE30\uD654\uD558\uC138\uC694." };
+            }
+            return { state: "still-open", message: "\uC544\uC9C1 \uC644\uB8CC\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4. \uD544\uC694\uD558\uBA74 \uB2E4\uC2DC \uC644\uB8CC \uCC98\uB9AC\uB97C \uC2DC\uB3C4\uD558\uC138\uC694." };
+          } catch (error) {
+            if (error instanceof CompletionRefreshError) {
+              await this.savePluginData();
+              new import_obsidian5.Notice("\uC644\uB8CC\uB294 \uD655\uC778\uB410\uC9C0\uB9CC \uD654\uBA74 \uC7AC\uB3D9\uAE30\uD654\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4. \uB3D9\uAE30\uD654 \uBC84\uD2BC\uC744 \uB2E4\uC2DC \uB204\uB974\uC138\uC694.", 9e3);
+              return { state: "completed" };
+            }
+            return { state: "error", message: this.completionErrorMessage(error) };
+          } finally {
+            this.syncing = false;
+            this.refreshViews();
+          }
+        }
+      }
+    ).open();
+  }
+  completionErrorMessage(error) {
+    if (error instanceof TickTickHttpError) {
+      if (error.kind === "auth") return "TickTick \uC778\uC99D\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4. API \uD1A0\uD070\uC744 \uD655\uC778\uD558\uC138\uC694.";
+      if (error.kind === "not-found") return "\uD0DC\uC2A4\uD06C\uAC00 \uC0AD\uC81C\uB418\uC5C8\uAC70\uB098 \uC774\uB3D9\uB418\uC5C8\uC2B5\uB2C8\uB2E4. \uB2E4\uC2DC \uB3D9\uAE30\uD654\uD558\uC138\uC694.";
+      if (error.kind === "rate-limit") return "TickTick \uC694\uCCAD\uC774 \uC81C\uD55C\uB418\uC5C8\uC2B5\uB2C8\uB2E4. \uC7A0\uC2DC \uD6C4 \uB2E4\uC2DC \uC2DC\uB3C4\uD558\uC138\uC694.";
+    }
+    return "TickTick \uC644\uB8CC \uCC98\uB9AC\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4. \uD0DC\uC2A4\uD06C\uB294 \uBCC0\uACBD\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.";
   }
   async ensureProjectsBase() {
     const path = (0, import_obsidian5.normalizePath)(this.settings.projectsBasePath);

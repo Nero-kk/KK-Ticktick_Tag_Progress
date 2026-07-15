@@ -4,17 +4,19 @@ import {
   Plugin,
   requestUrl,
   TFile,
+  TFolder,
 } from 'obsidian';
+import { resolveCanonicalProject } from './notes/project-mapper';
 import type { ApiTransport } from './api/official-open-api-client';
 import { OfficialOpenApiClient } from './api/official-open-api-client';
 import { TickTickHttpError } from './api/errors';
 import { addTickTickView } from './bases/projects-base-integrator';
-import { aggregateTagProgress, normalizeTagKey } from './core/tag-progress-aggregator';
+import { aggregateTagProgress, normalizeTagKey, orderTagRows, UNTAGGED_KEY } from './core/tag-progress-aggregator';
 import { normalizeTask } from './core/normalizer';
 import { clampTaskToMonth } from './core/period';
 import { SnapshotStore } from './core/snapshot-store';
 import { SyncService } from './core/sync-service';
-import { CompletionRefreshError, TaskCompletionService } from './core/task-completion-service';
+import { CompletionRefreshError, TaskCompletionService, type CompletionTarget } from './core/task-completion-service';
 import { ObsidianTaskNotePort } from './notes/obsidian-task-note-port';
 import { TaskNoteRepository } from './notes/task-note-repository';
 import { loadSettings, type TickTickTagProgressSettings } from './settings-model';
@@ -58,8 +60,21 @@ export default class TickTickTagProgressPlugin extends Plugin {
       transport,
     );
     this.syncService = new SyncService(this.api, this.snapshotStore);
-    this.taskCompletion = new TaskCompletionService(this.api, this.syncService);
-    this.taskNotes = new TaskNoteRepository(new ObsidianTaskNotePort(this.app), this.settings.projectAliases);
+    this.taskCompletion = new TaskCompletionService(
+      {
+        getTask: async (projectId, taskId) => normalizeTask(
+          await this.api.getTask(projectId, taskId),
+          this.projectNameFor(projectId),
+        ),
+        completeTask: (projectId, taskId) => this.api.completeTask(projectId, taskId),
+      },
+      { sync: (month) => this.syncService.sync(month) },
+    );
+    this.taskNotes = new TaskNoteRepository(
+      new ObsidianTaskNotePort(this.app, this.settings.projectsRootFolder, this.settings.taskNotesSubfolder),
+      this.settings.projectAliases,
+      { rootFolder: this.settings.projectsRootFolder, taskNotesSubfolder: this.settings.taskNotesSubfolder },
+    );
 
     this.registerView(DASHBOARD_VIEW_TYPE, (leaf) => new GanttDashboardView(leaf, this));
     this.addRibbonIcon('chart-gantt', 'TickTick 태그 진행률', () => { void this.activateDashboard(); });
@@ -97,6 +112,47 @@ export default class TickTickTagProgressPlugin extends Plugin {
     }
   }
 
+  private listProjectFolders(): string[] {
+    const root = this.app.vault.getFolderByPath(normalizePath(this.settings.projectsRootFolder));
+    if (!(root instanceof TFolder)) return [];
+    return root.children.filter((child): child is TFolder => child instanceof TFolder).map((folder) => folder.name);
+  }
+
+  // Canonical project folder -> its Project Hub note path, only when exactly one
+  // hub claims that project. Ambiguous or missing hubs are omitted (fail-closed).
+  private buildHubIndex(folders: string[]): Map<string, string> {
+    const byCanonical = new Map<string, string[]>();
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+      if (!frontmatter || frontmatter.type !== this.settings.hubNoteType || typeof frontmatter.project !== 'string') continue;
+      const canonical = resolveCanonicalProject(frontmatter.project, folders, this.settings.projectAliases);
+      if (!canonical) continue;
+      const paths = byCanonical.get(canonical) ?? [];
+      paths.push(file.path);
+      byCanonical.set(canonical, paths);
+    }
+    const index = new Map<string, string>();
+    for (const [canonical, paths] of byCanonical) if (paths.length === 1) index.set(canonical, paths[0]!);
+    return index;
+  }
+
+  private hubPathForTag(tagKey: string, folders: string[], index: Map<string, string>): string | null {
+    if (tagKey === UNTAGGED_KEY) return null;
+    const canonical = resolveCanonicalProject(tagKey, folders, this.settings.projectAliases);
+    return canonical ? index.get(canonical) ?? null : null;
+  }
+
+  async openProjectHub(tagKey: string): Promise<void> {
+    const folders = this.listProjectFolders();
+    const path = this.hubPathForTag(tagKey, folders, this.buildHubIndex(folders));
+    if (!path) {
+      new Notice('연결된 Project Hub를 찾지 못했습니다.');
+      return;
+    }
+    const file = this.app.vault.getFileByPath(normalizePath(path));
+    if (file instanceof TFile) await this.app.workspace.getLeaf('tab').openFile(file);
+  }
+
   getDashboardModel(month: string, selectedTagKey?: string): DashboardModel {
     const snapshot = this.snapshotStore.getLastGood(month);
     const lastAttempt = this.snapshotStore.getLastAttempt();
@@ -113,23 +169,53 @@ export default class TickTickTagProgressPlugin extends Plugin {
     }
     const include = new Set(this.settings.includeTags.map(normalizeTagKey));
     const exclude = new Set(this.settings.excludeTags.map(normalizeTagKey));
-    const rows = aggregateTagProgress(snapshot.tasks, month, { showUntagged: this.settings.showUntagged })
-      .filter((row) => (include.size === 0 || include.has(row.tagKey)) && !exclude.has(row.tagKey));
+    const filteredRows = aggregateTagProgress(snapshot.tasks, month, { showUntagged: this.settings.showUntagged })
+      .filter((row) => (row.tagKey === UNTAGGED_KEY
+        ? this.settings.showUntagged
+        : (include.size === 0 || include.has(row.tagKey)) && !exclude.has(row.tagKey)));
+    const rows = orderTagRows(filteredRows, this.settings.includeTags);
     const scheduled = snapshot.tasks.filter((task) => {
-      const start = task.startAt ?? task.dueAt;
-      const due = task.dueAt ?? task.startAt;
+      const start = task.localStartDate ?? task.localDueDate;
+      const due = task.localDueDate ?? task.localStartDate;
       return Boolean(start && due && clampTaskToMonth(start, due, month));
     });
     const failedAfterSnapshot = lastAttempt
       && lastAttempt.selectedMonth === month
       && lastAttempt.result !== 'success'
       && lastAttempt.attemptedAt > snapshot.generatedAt;
+    const status = this.syncing ? 'syncing'
+      : failedAfterSnapshot ? 'stale'
+      : snapshot.coverage.status === 'partial' ? 'partial'
+      : 'complete';
+    // Summary counts come from the whole snapshot, before include/exclude filters,
+    // so hidden rows still surface as exception totals.
+    const considered = snapshot.tasks.filter((task) => task.status === 'open' || task.status === 'completed');
+    const ageMs = Date.now() - Date.parse(snapshot.generatedAt);
+    const summary = {
+      activeProjectCount: snapshot.coverage.projectIds.length,
+      taskTotal: considered.length,
+      taskCompleted: considered.filter((task) => task.status === 'completed').length,
+      untaggedCount: considered.filter((task) => task.tags.length === 0).length,
+      unscheduledCount: considered.filter((task) => !task.localStartDate && !task.localDueDate).length,
+      unknownStatusCount: snapshot.coverage.unknownTaskCount,
+      snapshotAgeMs: ageMs,
+      stale: !Number.isFinite(ageMs) || ageMs > this.settings.completionTtlMinutes * 60_000,
+    };
+    const folders = this.listProjectFolders();
+    const hubIndex = this.buildHubIndex(folders);
+    const hubPathsByTag: Record<string, string> = {};
+    for (const row of rows) {
+      const path = this.hubPathForTag(row.tagKey, folders, hubIndex);
+      if (path) hubPathsByTag[row.tagKey] = path;
+    }
     return {
       month,
-      status: this.syncing ? 'syncing' : failedAfterSnapshot ? 'stale' : 'complete',
+      status,
       lastSuccessAt: snapshot.generatedAt,
       uniqueTaskCount: new Set(scheduled.map((task) => task.id)).size,
       selectedTagKey,
+      summary,
+      hubPathsByTag,
       rows,
       tasks: snapshot.tasks,
     };
@@ -182,10 +268,22 @@ export default class TickTickTagProgressPlugin extends Plugin {
     }
   }
 
+  private projectNameFor(projectId: string): string {
+    for (const snapshot of this.snapshotStore.listSnapshots()) {
+      const match = snapshot.tasks.find((task) => task.projectId === projectId);
+      if (match) return match.projectName;
+    }
+    return projectId;
+  }
+
   requestTaskCompletion(month: string, taskId: string): void {
+    void this.beginTaskCompletion(month, taskId);
+  }
+
+  private async beginTaskCompletion(month: string, taskId: string): Promise<void> {
     const snapshot = this.snapshotStore.getLastGood(month);
     const task = snapshot?.tasks.find((candidate) => candidate.id === taskId);
-    if (!task) {
+    if (!snapshot || !task) {
       new Notice('선택한 태스크가 현재 snapshot에 없습니다. 다시 동기화하세요.');
       return;
     }
@@ -198,34 +296,110 @@ export default class TickTickTagProgressPlugin extends Plugin {
       return;
     }
 
-    new TaskCompletionModal(this.app, task, async () => {
-      await this.completeTaskAndRefresh(month, task);
-    }).open();
+    // Entry gate: never complete from a stale, incomplete, or since-failed snapshot.
+    if (snapshot.coverage.status !== 'complete') {
+      new Notice('조회 범위가 제한적입니다. 다시 동기화한 뒤 완료 처리하세요.', 8000);
+      return;
+    }
+    const lastAttempt = this.snapshotStore.getLastAttempt();
+    if (lastAttempt && lastAttempt.selectedMonth === month && lastAttempt.result !== 'success'
+      && lastAttempt.attemptedAt > snapshot.generatedAt) {
+      new Notice('마지막 동기화가 실패했습니다. 다시 동기화한 뒤 완료 처리하세요.', 8000);
+      return;
+    }
+    const ageMinutes = (Date.now() - Date.parse(snapshot.generatedAt)) / 60_000;
+    if (!Number.isFinite(ageMinutes) || ageMinutes > this.settings.completionTtlMinutes) {
+      new Notice(`데이터가 오래되었습니다. 다시 동기화한 뒤 완료 처리하세요.`, 8000);
+      return;
+    }
+
+    // Pre-flight exact-ID live read before showing the confirmation preview.
+    let preflight;
+    try {
+      preflight = await this.taskCompletion.preflight(task);
+    } catch (error) {
+      new Notice(this.completionErrorMessage(error), 8000);
+      return;
+    }
+    if (preflight.status === 'not-found') {
+      new Notice('태스크가 삭제되었거나 이동되었습니다. 다시 동기화하세요.', 8000);
+      return;
+    }
+    if (preflight.status === 'already-completed') {
+      new Notice('이미 완료된 태스크입니다. 다시 동기화하세요.');
+      return;
+    }
+
+    const live = preflight.live;
+    const target: CompletionTarget = { id: live.id, projectId: live.projectId, title: live.title, status: live.status };
+    new TaskCompletionModal(
+      this.app,
+      { title: live.title, projectName: live.projectName, changed: preflight.changed },
+      {
+        onConfirm: async () => {
+          this.syncing = true;
+          this.refreshViews();
+          try {
+            const result = await this.taskCompletion.complete(month, target);
+            if (result.status === 'unknown') {
+              return { state: 'unknown', message: '완료 요청이 시간 초과됐습니다. TickTick 반영 여부가 확정되지 않았습니다.' };
+            }
+            await this.savePluginData();
+            if (result.status === 'completed-unverified') {
+              new Notice(`“${live.title}” 완료 요청은 전송했으나 반영을 확인하지 못했습니다. 동기화로 확인하세요.`, 9000);
+            } else {
+              new Notice(`“${live.title}”을 TickTick에서 완료 처리했습니다.`);
+            }
+            return { state: 'completed' };
+          } catch (error) {
+            if (error instanceof CompletionRefreshError) {
+              await this.savePluginData();
+              new Notice('TickTick 완료 처리는 성공했지만 화면 재동기화에 실패했습니다. 동기화 버튼을 다시 누르세요.', 9000);
+              return { state: 'completed' };
+            }
+            return { state: 'error', message: this.completionErrorMessage(error) };
+          } finally {
+            this.syncing = false;
+            this.refreshViews();
+          }
+        },
+        onConfirmOutcome: async () => {
+          this.syncing = true;
+          this.refreshViews();
+          try {
+            const outcome = await this.taskCompletion.confirmOutcome(month, target);
+            if (outcome.status === 'completed') {
+              await this.savePluginData();
+              new Notice(`“${live.title}”이 TickTick에서 완료되어 있었습니다.`);
+              return { state: 'completed' };
+            }
+            if (outcome.status === 'not-found') {
+              return { state: 'error', message: '태스크가 삭제되었거나 이동되었습니다. 다시 동기화하세요.' };
+            }
+            return { state: 'still-open', message: '아직 완료되지 않았습니다. 필요하면 다시 완료 처리를 시도하세요.' };
+          } catch (error) {
+            if (error instanceof CompletionRefreshError) {
+              await this.savePluginData();
+              new Notice('완료는 확인됐지만 화면 재동기화에 실패했습니다. 동기화 버튼을 다시 누르세요.', 9000);
+              return { state: 'completed' };
+            }
+            return { state: 'error', message: this.completionErrorMessage(error) };
+          } finally {
+            this.syncing = false;
+            this.refreshViews();
+          }
+        },
+      },
+    ).open();
   }
 
-  private async completeTaskAndRefresh(month: string, task: DashboardModel['tasks'][number]): Promise<void> {
-    if (this.syncing) throw new Error('현재 동기화가 끝난 뒤 다시 시도하세요.');
-    this.syncing = true;
-    this.refreshViews();
-    try {
-      await this.taskCompletion.completeAndRefresh(month, task);
-      await this.savePluginData();
-      new Notice(`“${task.title}”을 TickTick에서 완료 처리했습니다.`);
-    } catch (error) {
-      await this.savePluginData();
-      if (error instanceof CompletionRefreshError) {
-        new Notice('TickTick 완료 처리는 성공했지만 화면 재동기화에 실패했습니다. 동기화 버튼을 다시 누르세요.', 9000);
-        return;
-      }
-      const message = error instanceof TickTickHttpError && error.kind === 'auth'
-        ? 'TickTick 인증에 실패했습니다. API 토큰을 확인하세요.'
-        : 'TickTick 완료 처리에 실패했습니다. 태스크는 변경되지 않았습니다.';
-      new Notice(message, 8000);
-      throw new Error(message);
-    } finally {
-      this.syncing = false;
-      this.refreshViews();
+  private completionErrorMessage(error: unknown): string {
+    if (error instanceof TickTickHttpError) {
+      if (error.kind === 'auth') return 'TickTick 인증에 실패했습니다. API 토큰을 확인하세요.';
+      if (error.kind === 'not-found') return '태스크가 삭제되었거나 이동되었습니다. 다시 동기화하세요.';
+      if (error.kind === 'rate-limit') return 'TickTick 요청이 제한되었습니다. 잠시 후 다시 시도하세요.';
     }
+    return 'TickTick 완료 처리에 실패했습니다. 태스크는 변경되지 않았습니다.';
   }
 
   async ensureProjectsBase(): Promise<void> {

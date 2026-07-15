@@ -4,11 +4,16 @@ import { updateManagedBlock, updateManagedFrontmatter, type TaskNoteMeta } from 
 import type { TaskNotePort, TaskNoteReference } from './task-note-repository';
 
 export class ObsidianTaskNotePort implements TaskNotePort {
-  constructor(private readonly app: App) {}
+  constructor(
+    private readonly app: App,
+    private readonly rootFolder = '40. Projects',
+    private readonly taskNotesSubfolder = 'TickTick Notes',
+  ) {}
 
   async listTaskNotes(): Promise<TaskNoteReference[]> {
     const notes: TaskNoteReference[] = [];
-    const candidates = this.app.vault.getMarkdownFiles().filter((file) => file.path.includes('/TickTick Notes/'));
+    const marker = `/${this.taskNotesSubfolder}/`;
+    const candidates = this.app.vault.getMarkdownFiles().filter((file) => file.path.includes(marker));
     for (const file of candidates) {
       const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
       if (frontmatter?.type === 'ticktick-task-note' && typeof frontmatter.ticktickId === 'string') {
@@ -30,7 +35,7 @@ export class ObsidianTaskNotePort implements TaskNotePort {
   }
 
   async listProjectFolders(): Promise<string[]> {
-    const projects = this.app.vault.getFolderByPath('40. Projects');
+    const projects = this.app.vault.getFolderByPath(this.rootFolder);
     if (!projects) return [];
     return projects.children.filter((child): child is TFolder => child instanceof TFolder).map((folder) => folder.name);
   }

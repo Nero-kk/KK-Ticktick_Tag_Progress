@@ -23,6 +23,21 @@ export function getMonthRange(month: string): { startDate: string; endDate: stri
   return { startDate: `${month}-01`, endDate: `${month}-${String(daysInMonth(month)).padStart(2, '0')}` };
 }
 
+function shiftDate(date: string, deltaDays: number): string {
+  const time = Date.parse(`${date}T00:00:00Z`) + deltaDays * 86_400_000;
+  return new Date(time).toISOString().slice(0, 10);
+}
+
+/**
+ * Widens the exact month range by one day on each side so tasks sitting on the
+ * KST/UTC month boundary are fetched from the server. Local filtering with
+ * clampTaskToMonth still places them in the correct month for display.
+ */
+export function getQueryRange(month: string): { startDate: string; endDate: string } {
+  const range = getMonthRange(month);
+  return { startDate: shiftDate(range.startDate, -1), endDate: shiftDate(range.endDate, 1) };
+}
+
 function datePart(value: string): string | null {
   const match = /^(\d{4}-\d{2}-\d{2})/.exec(value);
   return match?.[1] ?? null;

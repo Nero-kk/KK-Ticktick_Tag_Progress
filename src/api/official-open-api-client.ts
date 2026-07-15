@@ -69,7 +69,7 @@ export class OfficialOpenApiClient {
     });
   }
 
-  async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  async request<T>(method: string, path: string, body?: unknown, options: { retry?: boolean } = {}): Promise<T> {
     this.guard.assertAllowed(method, path);
     const token = await this.tokenProvider();
     if (!token) throw new TickTickHttpError(401, 'auth', 'TickTick API token is not configured');
@@ -83,6 +83,7 @@ export class OfficialOpenApiClient {
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     };
+    if (options.retry === false) return this.requestOnce<T>(apiRequest);
     for (let attempt = 0; attempt < 4; attempt += 1) {
       let response: ApiResponse;
       try {
@@ -103,6 +104,24 @@ export class OfficialOpenApiClient {
       throw new TickTickHttpError(response.status, kindForStatus(response.status));
     }
     throw new TickTickHttpError(0, 'network', 'TickTick retry budget exhausted');
+  }
+
+  /**
+   * Single-shot request for write operations. A completion POST is never retried:
+   * a timeout or 5xx after the request left the client leaves the result
+   * indeterminate, so it surfaces as `unknown-outcome` for the caller to confirm
+   * with an exact read rather than blindly resending.
+   */
+  private async requestOnce<T>(apiRequest: ApiRequest): Promise<T> {
+    let response: ApiResponse;
+    try {
+      response = await this.callWithTimeout(apiRequest);
+    } catch {
+      throw new TickTickHttpError(0, 'unknown-outcome', 'TickTick write result is unconfirmed');
+    }
+    if (response.status >= 200 && response.status < 300) return response.json as T;
+    if (response.status >= 500) throw new TickTickHttpError(response.status, 'unknown-outcome', 'TickTick write result is unconfirmed');
+    throw new TickTickHttpError(response.status, kindForStatus(response.status));
   }
 
   async getProjects(): Promise<TickTickProject[]> {
@@ -133,6 +152,8 @@ export class OfficialOpenApiClient {
     await this.request(
       'POST',
       `/project/${encodeURIComponent(projectId)}/task/${encodeURIComponent(taskId)}/complete`,
+      undefined,
+      { retry: false },
     );
   }
 }

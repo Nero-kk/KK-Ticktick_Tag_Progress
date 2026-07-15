@@ -1,5 +1,17 @@
 import type { NormalizedTask, TagProgress } from '../api/contracts';
 import { daysInMonth } from '../core/period';
+import { UNTAGGED_KEY } from '../core/tag-progress-aggregator';
+
+export interface DashboardSummary {
+  activeProjectCount: number;
+  taskTotal: number;
+  taskCompleted: number;
+  untaggedCount: number;
+  unscheduledCount: number;
+  unknownStatusCount: number;
+  snapshotAgeMs: number;
+  stale: boolean;
+}
 
 export interface DashboardModel {
   month: string;
@@ -7,6 +19,8 @@ export interface DashboardModel {
   lastSuccessAt?: string;
   uniqueTaskCount: number;
   selectedTagKey?: string;
+  summary?: DashboardSummary;
+  hubPathsByTag?: Record<string, string>;
   rows: TagProgress[];
   tasks: NormalizedTask[];
 }
@@ -18,6 +32,34 @@ export interface DashboardActions {
   onRequestComplete(taskId: string): void;
   onOpenTask(taskId: string, newPane: boolean): void;
   onOpenBases(tagKey?: string): void;
+  onOpenHub(tagKey: string): void;
+}
+
+const STAGNATION_DAYS = 7;
+
+function todayLocalDate(): string {
+  return new Intl.DateTimeFormat('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+}
+
+// Sort drilldown tasks by due date ascending, unscheduled last, open before
+// completed on the same day, so the most pressing work surfaces at the top.
+function compareByDue(a: NormalizedTask, b: NormalizedTask): number {
+  const ad = a.localDueDate;
+  const bd = b.localDueDate;
+  if (ad !== bd) {
+    if (ad === undefined) return 1;
+    if (bd === undefined) return -1;
+    return ad < bd ? -1 : 1;
+  }
+  const rank = (task: NormalizedTask): number => (task.status === 'open' ? 0 : 1);
+  return rank(a) - rank(b);
+}
+
+function daysSince(iso: string | undefined, now: number = Date.now()): number | null {
+  if (!iso) return null;
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return null;
+  return Math.max(0, Math.floor((now - then) / 86_400_000));
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string): HTMLElementTagNameMap[K] {
@@ -50,7 +92,10 @@ function renderToolbar(root: HTMLElement, model: DashboardModel, actions: Dashbo
   monthNav.append(prev, month, next);
 
   const meta = element('div', 'ttgp-toolbar-meta');
-  const status = element('span', `ttgp-status ttgp-status--${model.status}`, model.status === 'complete' ? '전체 조회' : model.status);
+  const statusLabels: Partial<Record<DashboardModel['status'], string>> = {
+    complete: '전체 조회', partial: '부분 조회', stale: '오래됨', syncing: '동기화 중', empty: '데이터 없음',
+  };
+  const status = element('span', `ttgp-status ttgp-status--${model.status}`, statusLabels[model.status] ?? model.status);
   const count = element('span', 'ttgp-count', `일정 태스크 ${model.uniqueTaskCount}`);
   const synced = element('span', 'ttgp-last-sync', model.lastSuccessAt ? `마지막 성공 ${new Date(model.lastSuccessAt).toLocaleString('ko-KR')}` : '동기화 기록 없음');
   meta.append(status, count, synced);
@@ -62,11 +107,45 @@ function renderToolbar(root: HTMLElement, model: DashboardModel, actions: Dashbo
   root.append(toolbar);
 }
 
+function formatAge(ageMs: number): string {
+  if (!Number.isFinite(ageMs) || ageMs < 0) return '시각 불명';
+  const minutes = Math.floor(ageMs / 60_000);
+  if (minutes < 1) return '방금 전';
+  if (minutes < 60) return `${minutes}분 전`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}시간 전`;
+  return `${Math.floor(hours / 24)}일 전`;
+}
+
+function renderSummary(root: HTMLElement, summary: DashboardSummary): void {
+  const strip = element('section', 'ttgp-summary');
+  strip.setAttribute('aria-label', '월간 요약');
+  const metric = (label: string, value: string, extraClass?: string): HTMLElement => {
+    const item = element('span', `ttgp-summary-item${extraClass ? ` ${extraClass}` : ''}`);
+    item.append(element('strong', 'ttgp-summary-value', value), element('span', 'ttgp-summary-label', label));
+    return item;
+  };
+  strip.append(
+    metric('활성 프로젝트', String(summary.activeProjectCount)),
+    metric('태스크', `${summary.taskCompleted}/${summary.taskTotal}`),
+    metric('미분류', String(summary.untaggedCount), summary.untaggedCount > 0 ? 'is-flagged' : undefined),
+    metric('기간 미지정', String(summary.unscheduledCount), summary.unscheduledCount > 0 ? 'is-flagged' : undefined),
+  );
+  if (summary.unknownStatusCount > 0) {
+    strip.append(metric('상태 미확정', String(summary.unknownStatusCount), 'is-warning'));
+  }
+  const freshness = element('span', `ttgp-summary-freshness${summary.stale ? ' is-stale' : ''}`);
+  freshness.append(element('span', 'ttgp-summary-label', '데이터'), element('strong', 'ttgp-summary-value', formatAge(summary.snapshotAgeMs)));
+  if (summary.stale) freshness.append(element('span', 'ttgp-summary-badge', '동기화 필요'));
+  strip.append(freshness);
+  root.append(strip);
+}
+
 function renderHeader(root: HTMLElement, month: string): void {
   const header = element('div', 'ttgp-grid-header');
   const tag = element('div', 'ttgp-heading ttgp-heading--tag', '태그');
   tag.dataset.column = 'tag';
-  const progress = element('div', 'ttgp-heading ttgp-heading--progress', '진행률');
+  const progress = element('div', 'ttgp-heading ttgp-heading--progress', '태스크 완료율');
   progress.dataset.column = 'progress';
   const timeline = element('div', 'ttgp-timeline-header');
   timeline.dataset.column = 'timeline';
@@ -84,9 +163,11 @@ function renderHeader(root: HTMLElement, month: string): void {
 function renderRows(root: HTMLElement, model: DashboardModel, actions: DashboardActions): void {
   const rows = element('div', 'ttgp-rows');
   const dayCount = daysInMonth(model.month);
-  for (const row of model.rows) {
+  for (const [index, row] of model.rows.entries()) {
     const selected = row.tagKey === model.selectedTagKey;
-    const rowEl = element('div', `ttgp-row${selected ? ' is-selected' : ''}`);
+    // Visually separate the untagged "기타" group from the project rows above it.
+    const startsUntaggedGroup = row.tagKey === UNTAGGED_KEY && index > 0;
+    const rowEl = element('div', `ttgp-row${selected ? ' is-selected' : ''}${startsUntaggedGroup ? ' ttgp-row--untagged-group' : ''}`);
     rowEl.setAttribute('role', 'button');
     rowEl.tabIndex = 0;
     rowEl.setAttribute('aria-expanded', String(selected));
@@ -103,8 +184,21 @@ function renderRows(root: HTMLElement, model: DashboardModel, actions: Dashboard
     const tag = element('div', 'ttgp-tag-cell');
     tag.append(element('span', 'ttgp-tag-mark'), element('strong', 'ttgp-tag-name', row.displayName));
     if (row.unscheduledCount > 0) tag.append(element('span', 'ttgp-unscheduled', `+${row.unscheduledCount} 기간 미지정`));
+    const hubPath = model.hubPathsByTag?.[row.tagKey];
+    if (hubPath) {
+      const hub = button('Hub', `${row.displayName} Project Hub 열기`);
+      hub.classList.add('ttgp-hub-link');
+      hub.addEventListener('click', (event) => { event.stopPropagation(); actions.onOpenHub(row.tagKey); });
+      tag.append(hub);
+    }
     const progress = element('div', 'ttgp-progress-cell');
     progress.append(element('strong', 'ttgp-fraction', `${row.completed}/${row.total}`), element('span', 'ttgp-percent', `${row.percent}%`));
+    if (row.total > 0) {
+      const days = daysSince(row.lastCompletedAt);
+      const stagnation = element('span', 'ttgp-last-completed', days === null ? '이번 달 완료 없음' : `마지막 완료 ${days}일 전`);
+      if (days !== null && days >= STAGNATION_DAYS) stagnation.classList.add('is-stale');
+      progress.append(stagnation);
+    }
     const timeline = element('div', 'ttgp-timeline-cell');
     timeline.style.setProperty('--tt-days', String(dayCount));
     if (row.total === 0 || row.visibleStartDay === undefined || row.visibleEndDay === undefined) {
@@ -131,7 +225,8 @@ function renderDrilldown(root: HTMLElement, model: DashboardModel, actions: Dash
   const selectedRow = model.rows.find((row) => row.tagKey === model.selectedTagKey);
   if (!selectedRow) return;
   const taskIds = new Set(selectedRow.taskIds);
-  const tasks = model.tasks.filter((task) => taskIds.has(task.id));
+  const today = todayLocalDate();
+  const tasks = model.tasks.filter((task) => taskIds.has(task.id)).sort(compareByDue);
   const panel = element('section', 'ttgp-drilldown');
   const header = element('div', 'ttgp-drilldown-header');
   const title = element('div');
@@ -156,7 +251,15 @@ function renderDrilldown(root: HTMLElement, model: DashboardModel, actions: Dash
     detail.type = 'button';
     detail.setAttribute('aria-label', `${task.title} 노트 생성 또는 열기`);
     detail.title = '태스크 노트 생성 또는 열기';
-    detail.append(element('strong', undefined, task.title), element('span', undefined, task.dueAt?.slice(0, 10) ?? '기간 미지정'));
+    const overdue = task.status === 'open' && task.localDueDate !== undefined && task.localDueDate < today;
+    const meta = element('span', 'ttgp-task-due');
+    if (overdue) {
+      meta.classList.add('is-overdue');
+      meta.append(element('span', 'ttgp-overdue-badge', '지연'), element('span', undefined, task.localDueDate!));
+    } else {
+      meta.textContent = task.localDueDate ?? '기간 미지정';
+    }
+    detail.append(element('strong', undefined, task.title), meta);
     detail.addEventListener('click', (event) => actions.onOpenTask(task.id, event.ctrlKey || event.metaKey));
     item.append(state, detail);
     list.append(item);
@@ -169,6 +272,7 @@ export function renderDashboard(root: HTMLElement, model: DashboardModel, action
   root.replaceChildren();
   root.classList.add('ttgp-dashboard');
   renderToolbar(root, model, actions);
+  if (model.summary) renderSummary(root, model.summary);
   if (model.status === 'empty' && model.rows.length === 0) {
     root.append(element('div', 'ttgp-empty', '이 월 데이터가 없습니다. 동기화를 실행하세요.'));
     return;

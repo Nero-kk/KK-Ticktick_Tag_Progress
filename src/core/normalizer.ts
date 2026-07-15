@@ -1,4 +1,5 @@
 import type { NormalizedTask, TaskStatus, TickTickTask } from '../api/contracts';
+import { systemTimeZone, toLocalDate } from './local-date';
 
 function requireString(value: unknown, field: string): string {
   if (typeof value !== 'string' || value.trim() === '') throw new Error(`Invalid task ${field}`);
@@ -12,7 +13,11 @@ function normalizeStatus(status: number): TaskStatus {
   return 'unknown';
 }
 
-export function normalizeTask(raw: TickTickTask, projectName: string): NormalizedTask {
+export function normalizeTask(
+  raw: TickTickTask,
+  projectName: string,
+  fallbackTimeZone: string = systemTimeZone(),
+): NormalizedTask {
   const id = requireString(raw.id, 'id');
   const projectId = requireString(raw.projectId, 'projectId');
   const title = requireString(raw.title, 'title');
@@ -21,6 +26,12 @@ export function normalizeTask(raw: TickTickTask, projectName: string): Normalize
     : typeof raw.desc === 'string'
       ? raw.desc
       : undefined;
+  const startAt = typeof raw.startDate === 'string' ? raw.startDate : undefined;
+  const dueAt = typeof raw.dueDate === 'string' ? raw.dueDate : undefined;
+  const timeZone = typeof raw.timeZone === 'string' ? raw.timeZone : undefined;
+  const isAllDay = raw.isAllDay === true;
+  const localStartDate = startAt ? toLocalDate(startAt, timeZone, isAllDay, fallbackTimeZone) : null;
+  const localDueDate = dueAt ? toLocalDate(dueAt, timeZone, isAllDay, fallbackTimeZone) : null;
   return {
     id,
     projectId,
@@ -29,10 +40,12 @@ export function normalizeTask(raw: TickTickTask, projectName: string): Normalize
     ...(body === undefined ? {} : { content: body }),
     tags: Array.isArray(raw.tags) ? raw.tags.filter((tag): tag is string => typeof tag === 'string' && tag.trim() !== '') : [],
     status: normalizeStatus(raw.status),
-    ...(typeof raw.startDate === 'string' ? { startAt: raw.startDate } : {}),
-    ...(typeof raw.dueDate === 'string' ? { dueAt: raw.dueDate } : {}),
+    ...(startAt === undefined ? {} : { startAt }),
+    ...(dueAt === undefined ? {} : { dueAt }),
     ...(typeof raw.completedTime === 'string' ? { completedAt: raw.completedTime } : {}),
-    ...(typeof raw.timeZone === 'string' ? { timeZone: raw.timeZone } : {}),
-    isAllDay: raw.isAllDay === true,
+    ...(timeZone === undefined ? {} : { timeZone }),
+    isAllDay,
+    ...(localStartDate ? { localStartDate } : {}),
+    ...(localDueDate ? { localDueDate } : {}),
   };
 }

@@ -60,4 +60,29 @@ describe('OfficialOpenApiClient', () => {
     const client = new OfficialOpenApiClient(() => 'token', async () => ({ status: 200, json: { not: 'projects' } }));
     await expect(client.getProjects()).rejects.toEqual(expect.objectContaining({ kind: 'contract' }));
   });
+
+  it('never retries a completion POST and reports an unconfirmed timeout', async () => {
+    let attempts = 0;
+    const client = new OfficialOpenApiClient(
+      () => 'token',
+      () => { attempts += 1; return Promise.reject(new Error('boom')); },
+      { sleep: async () => undefined, random: () => 0 },
+    );
+    await expect(client.completeTask('p', 't')).rejects.toEqual(expect.objectContaining({ kind: 'unknown-outcome' }));
+    expect(attempts).toBe(1);
+  });
+
+  it('treats a 5xx on a completion POST as an unconfirmed outcome without resending', async () => {
+    let attempts = 0;
+    const client = new OfficialOpenApiClient(() => 'token', async () => { attempts += 1; return { status: 500, json: null }; });
+    await expect(client.completeTask('p', 't')).rejects.toEqual(expect.objectContaining({ kind: 'unknown-outcome' }));
+    expect(attempts).toBe(1);
+  });
+
+  it('maps a 404 completion POST to a definitive not-found', async () => {
+    let attempts = 0;
+    const client = new OfficialOpenApiClient(() => 'token', async () => { attempts += 1; return { status: 404, json: null }; });
+    await expect(client.completeTask('p', 't')).rejects.toEqual(expect.objectContaining({ kind: 'not-found' }));
+    expect(attempts).toBe(1);
+  });
 });

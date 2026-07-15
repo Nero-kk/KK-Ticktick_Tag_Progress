@@ -14,10 +14,10 @@ const rows: TagProgress[] = [
 ];
 
 const tasks: NormalizedTask[] = [
-  { id: 't1', projectId: 'p1', projectName: 'UNIOS8K', title: 'MAIN FRAME 도면 검토', tags: ['UNIOS8K'], status: 'open', startAt: `${month}-01`, dueAt: `${month}-10`, isAllDay: true },
+  { id: 't1', projectId: 'p1', projectName: 'UNIOS8K', title: 'MAIN FRAME 도면 검토', tags: ['UNIOS8K'], status: 'open', startAt: `${month}-01`, dueAt: `${month}-10`, isAllDay: true, localStartDate: `${month}-01`, localDueDate: `${month}-10` },
   { id: 't2', projectId: 'p1', projectName: 'UNIOS8K', title: 'IFB 간섭 확인', tags: ['UNIOS8K'], status: 'completed', completedAt: `${month}-12`, isAllDay: true },
-  { id: 't3', projectId: 'p2', projectName: 'UNI610H', title: 'POWER RACK 조립 검토', tags: ['UNI610H'], status: 'open', startAt: `${month}-01`, dueAt: `${month}-15`, isAllDay: true },
-  { id: 't4', projectId: 'p3', projectName: 'UNI650A', title: '최종 승인', tags: ['UNI650A'], status: 'completed', startAt: `${month}-03`, dueAt: `${month}-24`, isAllDay: true },
+  { id: 't3', projectId: 'p2', projectName: 'UNI610H', title: 'POWER RACK 조립 검토', tags: ['UNI610H'], status: 'open', startAt: `${month}-01`, dueAt: `${month}-15`, isAllDay: true, localStartDate: `${month}-01`, localDueDate: `${month}-15` },
+  { id: 't4', projectId: 'p3', projectName: 'UNI650A', title: '최종 승인', tags: ['UNI650A'], status: 'completed', startAt: `${month}-03`, dueAt: `${month}-24`, isAllDay: true, localStartDate: `${month}-03`, localDueDate: `${month}-24` },
 ];
 
 renderDashboard(document.querySelector<HTMLElement>('#app')!, {
@@ -26,6 +26,10 @@ renderDashboard(document.querySelector<HTMLElement>('#app')!, {
   lastSuccessAt: '2026-07-14T05:32:00Z',
   uniqueTaskCount: 265,
   selectedTagKey: 'unios8k',
+  summary: {
+    activeProjectCount: 6, taskTotal: 265, taskCompleted: 200, untaggedCount: 3,
+    unscheduledCount: 2, unknownStatusCount: 0, snapshotAgeMs: 5 * 3_600_000, stale: false,
+  },
   rows,
   tasks,
 }, {
@@ -35,4 +39,5 @@ renderDashboard(document.querySelector<HTMLElement>('#app')!, {
   onRequestComplete: () => undefined,
   onOpenTask: () => undefined,
   onOpenBases: () => undefined,
+  onOpenHub: () => undefined,
 });

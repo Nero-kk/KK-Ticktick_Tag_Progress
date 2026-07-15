@@ -19,11 +19,6 @@ function equivalentKeys(value: string): Set<string> {
     candidates.add(`U${normalized}`);
     candidates.add(`UNI${normalized}`);
   }
-  if (normalized === 'UNIOS8K' || normalized === 'UOS8K' || normalized === 'OS8K') {
-    candidates.add('UNIOS8K');
-    candidates.add('UOS8K');
-    candidates.add('OS8K');
-  }
   return candidates;
 }
 

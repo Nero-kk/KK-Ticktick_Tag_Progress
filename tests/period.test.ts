@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clampTaskToMonth, daysInMonth, getMonthRange } from '../src/core/period';
+import { clampTaskToMonth, daysInMonth, getMonthRange, getQueryRange } from '../src/core/period';
 
 describe('period helpers', () => {
   it.each([
@@ -26,5 +26,11 @@ describe('period helpers', () => {
 
   it('returns local ISO month boundaries', () => {
     expect(getMonthRange('2026-07')).toEqual({ startDate: '2026-07-01', endDate: '2026-07-31' });
+  });
+
+  it('widens the query range by one day on each side, crossing month and year boundaries', () => {
+    expect(getQueryRange('2026-07')).toEqual({ startDate: '2026-06-30', endDate: '2026-08-01' });
+    expect(getQueryRange('2026-01')).toEqual({ startDate: '2025-12-31', endDate: '2026-02-01' });
+    expect(getQueryRange('2026-12')).toEqual({ startDate: '2026-11-30', endDate: '2027-01-01' });
   });
 });

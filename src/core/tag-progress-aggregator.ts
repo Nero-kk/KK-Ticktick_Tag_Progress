@@ -3,10 +3,39 @@ import { clampTaskToMonth } from './period';
 
 interface MutableRow extends TagProgress {
   taskIdSet: Set<string>;
+  lastCompletedMs?: number;
 }
+
+/**
+ * Reserved key for the virtual row that gathers tasks without any tag. It is not
+ * a valid normalized user tag (those never contain '__'), so a real tag literally
+ * named "미분류" stays a distinct row instead of merging into this bucket.
+ */
+export const UNTAGGED_KEY = '__untagged__';
+export const UNTAGGED_DISPLAY = '미분류';
 
 export function normalizeTagKey(tag: string): string {
   return tag.normalize('NFKC').toLocaleLowerCase('en-US');
+}
+
+/**
+ * Orders rows for the portfolio view: tags listed in `includeTags` follow that
+ * order (user-chosen priority), any remaining tags stay alphabetical, and the
+ * untagged bucket is always pinned last as its own "기타" group.
+ */
+export function orderTagRows(rows: TagProgress[], includeTags: string[]): TagProgress[] {
+  const order = new Map(includeTags.map((tag, index) => [normalizeTagKey(tag), index]));
+  return [...rows].sort((a, b) => {
+    const aUntagged = a.tagKey === UNTAGGED_KEY;
+    const bUntagged = b.tagKey === UNTAGGED_KEY;
+    if (aUntagged !== bUntagged) return aUntagged ? 1 : -1;
+    const aRank = order.get(a.tagKey);
+    const bRank = order.get(b.tagKey);
+    if (aRank !== undefined && bRank !== undefined) return aRank - bRank;
+    if (aRank !== undefined) return -1;
+    if (bRank !== undefined) return 1;
+    return a.tagKey.localeCompare(b.tagKey);
+  });
 }
 
 export function aggregateTagProgress(
@@ -20,22 +49,23 @@ export function aggregateTagProgress(
 
   for (const task of uniqueTasks.values()) {
     if (task.status !== 'open' && task.status !== 'completed') continue;
-    const rawTags = task.tags.length > 0 ? task.tags : options.showUntagged ? ['미분류'] : [];
-    if (rawTags.length === 0) continue;
-    const start = task.startAt ?? task.dueAt;
-    const due = task.dueAt ?? task.startAt;
+    const tagEntries = task.tags.length > 0
+      ? task.tags.map((raw) => ({ tagKey: normalizeTagKey(raw), displayName: raw.normalize('NFKC') }))
+      : options.showUntagged ? [{ tagKey: UNTAGGED_KEY, displayName: UNTAGGED_DISPLAY }] : [];
+    if (tagEntries.length === 0) continue;
+    const start = task.localStartDate ?? task.localDueDate;
+    const due = task.localDueDate ?? task.localStartDate;
     const span = start && due ? clampTaskToMonth(start, due, month) : null;
     const unscheduled = !start && !due;
     if (!span && !unscheduled) continue;
 
     const seenTags = new Set<string>();
-    for (const rawTag of rawTags) {
-      const tagKey = normalizeTagKey(rawTag);
+    for (const { tagKey, displayName } of tagEntries) {
       if (seenTags.has(tagKey)) continue;
       seenTags.add(tagKey);
       const row = rows.get(tagKey) ?? {
         tagKey,
-        displayName: rawTag.normalize('NFKC'),
+        displayName,
         completed: 0,
         open: 0,
         total: 0,
@@ -50,6 +80,13 @@ export function aggregateTagProgress(
       if (!row.taskIdSet.has(task.id)) {
         row.taskIdSet.add(task.id);
         row.taskIds.push(task.id);
+        if (task.status === 'completed' && task.completedAt) {
+          const completedMs = Date.parse(task.completedAt);
+          if (Number.isFinite(completedMs) && (row.lastCompletedMs === undefined || completedMs > row.lastCompletedMs)) {
+            row.lastCompletedMs = completedMs;
+            row.lastCompletedAt = task.completedAt;
+          }
+        }
         if (unscheduled) {
           row.hasUnscheduledTasks = true;
           row.unscheduledCount += 1;
@@ -70,5 +107,5 @@ export function aggregateTagProgress(
   return [...rows.values()]
     .filter((row) => row.total > 0 || row.unscheduledCount > 0)
     .sort((a, b) => a.tagKey.localeCompare(b.tagKey))
-    .map(({ taskIdSet: _taskIdSet, ...row }) => row);
+    .map(({ taskIdSet: _taskIdSet, lastCompletedMs: _lastCompletedMs, ...row }) => row);
 }

@@ -1,4 +1,5 @@
 import type { NormalizedTask, SyncCoverage, SyncSnapshot, TaskStatus } from '../api/contracts';
+import { systemTimeZone, toLocalDate } from './local-date';
 
 export interface LastAttempt {
   selectedMonth: string;
@@ -42,6 +43,15 @@ function sanitizeTask(value: unknown): NormalizedTask | null {
   const statuses: TaskStatus[] = ['open', 'completed', 'abandoned', 'unknown'];
   if (!tags || typeof item.status !== 'string' || !statuses.includes(item.status as TaskStatus)
     || typeof item.isAllDay !== 'boolean') return null;
+  const startAt = optionalString(item.startAt);
+  const dueAt = optionalString(item.dueAt);
+  const timeZone = optionalString(item.timeZone);
+  // Recompute local dates on load so v1 snapshots migrate transparently and the
+  // task's own time zone is honoured (matches normalizeTask). Stored values are
+  // ignored to keep a single derivation path.
+  const fallbackTimeZone = systemTimeZone();
+  const localStartDate = startAt ? toLocalDate(startAt, timeZone, item.isAllDay, fallbackTimeZone) : null;
+  const localDueDate = dueAt ? toLocalDate(dueAt, timeZone, item.isAllDay, fallbackTimeZone) : null;
   return {
     id: item.id,
     projectId: item.projectId,
@@ -49,17 +59,19 @@ function sanitizeTask(value: unknown): NormalizedTask | null {
     title: item.title,
     tags,
     status: item.status as TaskStatus,
-    ...(optionalString(item.startAt) === undefined ? {} : { startAt: optionalString(item.startAt) }),
-    ...(optionalString(item.dueAt) === undefined ? {} : { dueAt: optionalString(item.dueAt) }),
+    ...(startAt === undefined ? {} : { startAt }),
+    ...(dueAt === undefined ? {} : { dueAt }),
     ...(optionalString(item.completedAt) === undefined ? {} : { completedAt: optionalString(item.completedAt) }),
-    ...(optionalString(item.timeZone) === undefined ? {} : { timeZone: optionalString(item.timeZone) }),
+    ...(timeZone === undefined ? {} : { timeZone }),
     isAllDay: item.isAllDay,
+    ...(localStartDate ? { localStartDate } : {}),
+    ...(localDueDate ? { localDueDate } : {}),
   };
 }
 
 function sanitizeCoverage(value: unknown, selectedMonth: string): SyncCoverage | null {
   const item = record(value);
-  if (!item || item.status !== 'complete' || item.selectedMonth !== selectedMonth) return null;
+  if (!item || (item.status !== 'complete' && item.status !== 'partial') || item.selectedMonth !== selectedMonth) return null;
   const projectIds = stringArray(item.projectIds);
   const successfulCalls = stringArray(item.successfulCalls);
   if (!projectIds || !successfulCalls || !Array.isArray(item.failedCalls)
@@ -71,15 +83,18 @@ function sanitizeCoverage(value: unknown, selectedMonth: string): SyncCoverage |
     if (!entry || !nonEmptyString(entry.call) || typeof entry.reason !== 'string') return null;
     failedCalls.push({ call: entry.call, reason: entry.reason });
   }
+  const unknownTaskCount = typeof item.unknownTaskCount === 'number' && Number.isFinite(item.unknownTaskCount)
+    ? item.unknownTaskCount
+    : 0;
   return {
-    status: 'complete', selectedMonth, projectIds, successfulCalls, failedCalls,
-    openTaskCount: item.openTaskCount, completedTaskCount: item.completedTaskCount,
+    status: item.status, selectedMonth, projectIds, successfulCalls, failedCalls,
+    openTaskCount: item.openTaskCount, completedTaskCount: item.completedTaskCount, unknownTaskCount,
   };
 }
 
 function sanitizeSnapshot(value: unknown): SyncSnapshot | null {
   const item = record(value);
-  if (!item || item.schemaVersion !== 1 || !nonEmptyString(item.selectedMonth)
+  if (!item || (item.schemaVersion !== 1 && item.schemaVersion !== 2) || !nonEmptyString(item.selectedMonth)
     || !/^\d{4}-(0[1-9]|1[0-2])$/.test(item.selectedMonth) || !nonEmptyString(item.generatedAt)
     || !Array.isArray(item.tasks)) return null;
   const coverage = sanitizeCoverage(item.coverage, item.selectedMonth);
@@ -91,7 +106,7 @@ function sanitizeSnapshot(value: unknown): SyncSnapshot | null {
     tasks.push(sanitized);
   }
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     selectedMonth: item.selectedMonth,
     generatedAt: item.generatedAt,
     coverage,
@@ -135,7 +150,9 @@ export class SnapshotStore {
 
   accept(snapshot: SyncSnapshot): void {
     const sanitized = sanitizeSnapshot(snapshot);
-    if (!sanitized || sanitized.coverage.status !== 'complete') throw new Error('Only valid complete snapshots can replace last-good');
+    if (!sanitized || (sanitized.coverage.status !== 'complete' && sanitized.coverage.status !== 'partial')) {
+      throw new Error('Only valid complete or partial snapshots can replace last-good');
+    }
     this.state.snapshots[sanitized.selectedMonth] = sanitized;
     this.state.lastAttempt = { selectedMonth: sanitized.selectedMonth, attemptedAt: sanitized.generatedAt, result: 'success' };
   }
@@ -147,6 +164,10 @@ export class SnapshotStore {
   getLastGood(selectedMonth: string): SyncSnapshot | undefined {
     const snapshot = this.state.snapshots[selectedMonth];
     return snapshot ? clone(snapshot) : undefined;
+  }
+
+  listSnapshots(): SyncSnapshot[] {
+    return Object.values(this.state.snapshots).map(clone);
   }
 
   getLastAttempt(): LastAttempt | undefined {

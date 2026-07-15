@@ -14,6 +14,66 @@
     var(--background-primary);
 }
 
+.ttgp-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.ttgp-summary-item,
+.ttgp-summary-freshness {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 12px;
+  border: 1px solid var(--ttgp-line);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--background-primary) 94%, transparent);
+}
+
+.ttgp-summary-value {
+  font-size: 1.05em;
+  line-height: 1.1;
+  color: var(--ttgp-ink);
+}
+
+.ttgp-summary-label {
+  font-size: 0.72em;
+  color: var(--ttgp-muted);
+}
+
+.ttgp-summary-item.is-flagged {
+  border-color: color-mix(in srgb, var(--text-warning) 55%, var(--ttgp-line));
+}
+
+.ttgp-summary-item.is-warning {
+  border-color: color-mix(in srgb, var(--text-error) 55%, var(--ttgp-line));
+}
+
+.ttgp-summary-item.is-warning .ttgp-summary-value {
+  color: var(--text-error);
+}
+
+.ttgp-summary-freshness {
+  margin-left: auto;
+  align-items: flex-end;
+}
+
+.ttgp-summary-freshness.is-stale {
+  border-color: color-mix(in srgb, var(--text-error) 55%, var(--ttgp-line));
+}
+
+.ttgp-summary-badge {
+  margin-top: 2px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 0.68em;
+  color: var(--text-on-accent, #fff);
+  background: var(--text-error);
+}
+
 .ttgp-toolbar {
   position: sticky;
   top: 0;
@@ -109,6 +169,49 @@
 .ttgp-row {
   display: grid;
   grid-template-columns: 140px 116px minmax(560px, 1fr);
+}
+
+.ttgp-row--untagged-group {
+  border-top: 2px solid color-mix(in srgb, var(--ttgp-line) 70%, var(--ttgp-ink));
+}
+
+.ttgp-hub-link {
+  margin-left: 6px;
+  padding: 0 6px;
+  font-size: 0.7em;
+  line-height: 1.6;
+  border: 1px solid var(--ttgp-line);
+  border-radius: 4px;
+  color: var(--ttgp-muted);
+}
+
+.ttgp-hub-link:hover {
+  color: var(--interactive-accent);
+  border-color: var(--interactive-accent);
+}
+
+.ttgp-last-completed {
+  font-size: 0.7em;
+  color: var(--ttgp-muted);
+}
+
+.ttgp-last-completed.is-stale {
+  color: var(--text-warning);
+}
+
+.ttgp-task-due.is-overdue {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-error);
+}
+
+.ttgp-overdue-badge {
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 0.72em;
+  color: var(--text-on-accent, #fff);
+  background: var(--text-error);
 }
 
 .ttgp-grid-header {
@@ -398,6 +501,13 @@
   border-radius: var(--radius-s);
   color: var(--text-error);
   background: color-mix(in srgb, var(--background-modifier-error) 18%, transparent);
+}
+
+.ttgp-completion-changed {
+  padding: 10px 12px;
+  border-radius: var(--radius-s);
+  color: var(--text-warning);
+  background: color-mix(in srgb, var(--background-modifier-error) 10%, transparent);
 }
 
 .ttgp-completion-actions {

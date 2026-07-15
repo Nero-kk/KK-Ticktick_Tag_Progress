@@ -70,6 +70,8 @@ export interface NormalizedTask {
   completedAt?: string;
   timeZone?: string;
   isAllDay: boolean;
+  localStartDate?: string;
+  localDueDate?: string;
 }
 
 export interface SyncCoverage {
@@ -80,10 +82,11 @@ export interface SyncCoverage {
   failedCalls: Array<{ call: string; reason: string }>;
   openTaskCount: number;
   completedTaskCount: number;
+  unknownTaskCount: number;
 }
 
 export interface SyncSnapshot {
-  schemaVersion: 1;
+  schemaVersion: 2;
   selectedMonth: string;
   generatedAt: string;
   coverage: SyncCoverage;
@@ -103,5 +106,6 @@ export interface TagProgress {
   clippedAfterMonth: boolean;
   hasUnscheduledTasks: boolean;
   unscheduledCount: number;
+  lastCompletedAt?: string;
   taskIds: string[];
 }

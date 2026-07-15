@@ -54,6 +54,7 @@ export class GanttDashboardView extends ItemView {
       onRequestComplete: (taskId) => { this.plugin.requestTaskCompletion(this.month, taskId); },
       onOpenTask: (taskId, newPane) => { void this.plugin.openTaskNote(this.month, taskId, newPane); },
       onOpenBases: (tagKey) => { void this.plugin.openProjectsBase(tagKey); },
+      onOpenHub: (tagKey) => { void this.plugin.openProjectHub(tagKey); },
     });
   }
 }

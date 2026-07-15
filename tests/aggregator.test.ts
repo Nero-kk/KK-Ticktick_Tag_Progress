@@ -1,9 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { aggregateTagProgress } from '../src/core/tag-progress-aggregator';
-import type { NormalizedTask } from '../src/api/contracts';
+import { aggregateTagProgress, orderTagRows, UNTAGGED_KEY } from '../src/core/tag-progress-aggregator';
+import type { NormalizedTask, TagProgress } from '../src/api/contracts';
 
-function task(id: string, status: NormalizedTask['status'], tags: string[], startAt = '2026-07-01', dueAt = '2026-07-10'): NormalizedTask {
-  return { id, projectId: 'p', projectName: 'P', title: id, tags, status, startAt, dueAt, isAllDay: true };
+function task(
+  id: string,
+  status: NormalizedTask['status'],
+  tags: string[],
+  startAt: string | undefined = '2026-07-01',
+  dueAt: string | undefined = '2026-07-10',
+): NormalizedTask {
+  return {
+    id, projectId: 'p', projectName: 'P', title: id, tags, status, isAllDay: true,
+    ...(startAt ? { startAt, localStartDate: startAt } : {}),
+    ...(dueAt ? { dueAt, localDueDate: dueAt } : {}),
+  };
 }
 
 describe('aggregateTagProgress', () => {
@@ -25,13 +35,56 @@ describe('aggregateTagProgress', () => {
   });
 
   it('keeps unscheduled tasks outside the denominator and reports them', () => {
-    const unscheduled = { ...task('u', 'open', ['A']), startAt: undefined, dueAt: undefined };
+    const unscheduled: NormalizedTask = { id: 'u', projectId: 'p', projectName: 'P', title: 'u', tags: ['A'], status: 'open', isAllDay: true };
     expect(aggregateTagProgress([task('s', 'completed', ['A']), unscheduled], '2026-07')[0]).toMatchObject({
       completed: 1, open: 0, total: 1, hasUnscheduledTasks: true, unscheduledCount: 1,
     });
   });
 
+  it('records the most recent completion time per tag', () => {
+    const early = { ...task('e', 'completed', ['A']), completedAt: '2026-07-03T09:00:00.000+0000' };
+    const late = { ...task('l', 'completed', ['A']), completedAt: '2026-07-11T09:00:00.000+0000' };
+    const [row] = aggregateTagProgress([early, late], '2026-07');
+    expect(row?.lastCompletedAt).toBe('2026-07-11T09:00:00.000+0000');
+  });
+
+  it('leaves lastCompletedAt undefined when nothing is completed', () => {
+    const [row] = aggregateTagProgress([task('o', 'open', ['A'])], '2026-07');
+    expect(row?.lastCompletedAt).toBeUndefined();
+  });
+
   it('excludes abandoned and unknown tasks', () => {
     expect(aggregateTagProgress([task('a', 'abandoned', ['A']), task('u', 'unknown', ['A'])], '2026-07')).toEqual([]);
+  });
+
+  it('gathers untagged tasks under a reserved key only when showUntagged is on', () => {
+    const untagged = task('u', 'open', []);
+    expect(aggregateTagProgress([untagged], '2026-07')).toEqual([]);
+    const [row] = aggregateTagProgress([untagged], '2026-07', { showUntagged: true });
+    expect(row).toMatchObject({ tagKey: UNTAGGED_KEY, displayName: '미분류', total: 1 });
+  });
+
+  it('orders rows by include priority, then alphabetically, with untagged pinned last', () => {
+    const row = (tagKey: string): TagProgress => ({
+      tagKey, displayName: tagKey, completed: 0, open: 1, total: 1, percent: 0,
+      clippedBeforeMonth: false, clippedAfterMonth: false, hasUnscheduledTasks: false, unscheduledCount: 0, taskIds: [],
+    });
+    const ordered = orderTagRows(
+      [row('zeta'), row(UNTAGGED_KEY), row('u610h'), row('alpha'), row('uos8k')],
+      ['uos8k', 'u610h'],
+    );
+    expect(ordered.map((r) => r.tagKey)).toEqual(['uos8k', 'u610h', 'alpha', 'zeta', UNTAGGED_KEY]);
+  });
+
+  it('keeps a real "미분류" tag separate from the reserved untagged row', () => {
+    const rows = aggregateTagProgress(
+      [task('real', 'open', ['미분류']), task('none', 'open', [])],
+      '2026-07',
+      { showUntagged: true },
+    );
+    const keys = rows.map((row) => row.tagKey);
+    expect(keys).toContain('미분류');
+    expect(keys).toContain(UNTAGGED_KEY);
+    expect(keys).toHaveLength(2);
   });
 });
